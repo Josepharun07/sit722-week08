@@ -1,45 +1,56 @@
 name: 01 - CI
 
 on:
-  # Trigger the workflow on push to main branch
   push:
     branches:
       - main
-  
-  # Manual trigger for the workflow
   workflow_dispatch:
 
-
 jobs:
+  # =========================================================
+  # 1. Infrastructure as Code (IaC) Validation
+  # =========================================================
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init (Validation Only)
+        working-directory: ./terraform
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: ./terraform
+        run: terraform validate
 
   # =========================================================
-  # Backend Tests
+  # Backend Tests (Existing)
   # =========================================================
   backend-test:
     name: Test ${{ matrix.service }}
+    needs: terraform-validate
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
-
       matrix:
         include:
           - service: user-service
             database: users
             port: 5433
-
           - service: student-service
             database: students
             port: 5434
-
           - service: lecturer-service
             database: lecturers
             port: 5435
-
           - service: course-service
             database: courses
             port: 5436
-
           - service: enrollment-service
             database: enrollments
             port: 5437
@@ -47,15 +58,12 @@ jobs:
     services:
       postgres:
         image: postgres:16
-
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: ${{ matrix.database }}
-
         ports:
           - ${{ matrix.port }}:5432
-
         options: >-
           --health-cmd="pg_isready -U postgres -d ${{ matrix.database }}"
           --health-interval=5s
@@ -68,81 +76,67 @@ jobs:
       POSTGRES_DB: ${{ matrix.database }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: ${{ matrix.port }}
-
       JWT_SECRET_KEY: koalatech-ci-test-secret
       JWT_ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_MINUTES: 30
-
       DEFAULT_ADMIN_USERNAME: admin
       DEFAULT_ADMIN_EMAIL: admin@koalatech.edu.au
       DEFAULT_ADMIN_PASSWORD: AdminPassword123!
-
       AZURE_STORAGE_CONNECTION_STRING: ""
       AZURE_STORAGE_CONTAINER_NAME: ""
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v5
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
       - name: Run tests
         working-directory: ${{ matrix.service }}
         run: |
           pytest -v
 
-
   # =========================================================
-  # Build and Push Docker Images
+  # Build, Scan (Docker Scout), and Push Images
   # =========================================================
   build-and-push:
     name: Build and Push ${{ matrix.image }}
     runs-on: ubuntu-latest
-
-    # All backend tests must pass before this job starts
-    needs:
-      - backend-test
-
-    # Build and push when code is pushed to main or manually triggered
+    needs: backend-test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     strategy:
       fail-fast: false
-
       matrix:
         include:
           - service: frontend
             image: koalatech-frontend
-
           - service: user-service
             image: koalatech-user-service
-
           - service: student-service
             image: koalatech-student-service
-
           - service: lecturer-service
             image: koalatech-lecturer-service
-
           - service: course-service
             image: koalatech-course-service
-
           - service: enrollment-service
             image: koalatech-enrollment-service
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Login to Docker Hub (For Scout)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PAT }}
 
       - name: Login to Azure
         uses: azure/login@v3
@@ -160,7 +154,15 @@ jobs:
             -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
             ./${{ matrix.service }}
 
-      - name: Push Docker image with commit SHA
+      - name: Docker Scout Vulnerability Scan
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          ignore-unchanged: true
+          only-severities: critical,high
+
+      - name: Push Docker image
         run: |
           docker push \
             ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}

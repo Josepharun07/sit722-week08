@@ -149,3 +149,14 @@ jobs:
           kubectl get pods -n production
           kubectl get services -n production
           kubectl get pvc -n production
+
+      - name: Add Prometheus Helm Repo
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+
+      - name: Deploy/Update Monitoring Stack
+        run: |
+          helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --create-namespace    
