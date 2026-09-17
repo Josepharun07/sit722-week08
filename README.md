@@ -311,3 +311,5 @@ After the production deployment completes:
 - Access the production application.
 - Confirm that the application is working correctly.
 - Verify that production is running the same image SHA that was tested in staging.
+
+!test trigger 

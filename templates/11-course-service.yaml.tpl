@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: course-service
+  namespace: default
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: course-service
+
+  template:
+    metadata:
+      labels:
+        app: course-service
+
+    spec:
+      initContainers:
+        - name: wait-for-course-db
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready \
+                -h course-db \
+                -p 5432 \
+                -U postgres \
+                -d courses;
+              do
+                echo "Waiting for course database..."
+                sleep 3
+              done
+
+      containers:
+        - name: course-service
+          image: ${acr_server}/course-service:latest
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8000
+
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: koalatech-application-secret
+                  key: POSTGRES_USER
+
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: koalatech-application-secret
+                  key: POSTGRES_PASSWORD
+
+            - name: POSTGRES_DB
+              value: courses
+
+            - name: POSTGRES_HOST
+              value: course-db
+
+            - name: POSTGRES_PORT
+              value: "5432"
+
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: koalatech-application-secret
+                  key: JWT_SECRET_KEY
+
+            - name: JWT_ALGORITHM
+              value: HS256
+
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: course-service
+  namespace: default
+spec:
+  type: ClusterIP
+
+  selector:
+    app: course-service
+
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
