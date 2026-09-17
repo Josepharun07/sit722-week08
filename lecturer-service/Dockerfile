@@ -11,7 +11,7 @@ RUN pip install \
 
 COPY . .
 
-RUN useradd -m appuser \
+RUN adduser -D appuser \
     && chown -R appuser:appuser /app
 
 USER appuser
