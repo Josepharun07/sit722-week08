@@ -44,7 +44,12 @@ jobs:
       - name: Scale Green to zero
         run: |
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl scale deployment/${svc}-green -n production --replicas=0 --ignore-not-found=true
+            if kubectl get deployment "${svc}-green" -n production >/dev/null 2>&1; then
+              kubectl scale deployment/"${svc}-green" -n production --replicas=0
+              echo "Scaled ${svc}-green to 0"
+            else
+              echo "Deployment ${svc}-green not found — skipping"
+            fi
           done
 
       - name: Send Rollback Email
