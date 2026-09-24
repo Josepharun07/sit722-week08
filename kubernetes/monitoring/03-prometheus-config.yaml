@@ -141,7 +141,7 @@ data:
 
           - alert: DeploymentReplicasUnavailable
             expr: kube_deployment_status_replicas_unavailable > 0
-            for: 3m
+            for: 5m
             labels:
               severity: warning
             annotations:
