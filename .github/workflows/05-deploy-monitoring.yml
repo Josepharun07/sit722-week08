@@ -51,7 +51,7 @@ jobs:
         run: kubectl apply -f kubernetes/monitoring/
 
       - name: Wait for Prometheus
-        run: kubectl rollout status deployment/prometheus -n monitoring --timeout=180s
+        run: kubectl rollout status deployment/prometheus -n monitoring 
 
       - name: Wait for Grafana
         run: kubectl rollout status deployment/grafana -n monitoring --timeout=180s
