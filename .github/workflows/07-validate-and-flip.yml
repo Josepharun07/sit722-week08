@@ -65,20 +65,24 @@ jobs:
             -o jsonpath='{.items[0].metadata.name}')
           kubectl logs "$K6_POD" -n monitoring | tee /tmp/k6-full.log
 
-          if grep -q 'K6_SUMMARY_JSON=' /tmp/k6-full.log; then
-            grep 'K6_SUMMARY_JSON=' /tmp/k6-full.log | tail -1 | sed 's/^.*K6_SUMMARY_JSON=//' > /tmp/k6-summary.json
-            cat /tmp/k6-summary.json
-            echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
-            echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
-            PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
-            if [ "$PASSED" != "true" ]; then
-              echo "k6 thresholds failed — refusing traffic flip"
-              exit 1
-            fi
+          if grep -q '@@@K6_SUMMARY_START@@@' /tmp/k6-full.log; then
+            sed -n '/@@@K6_SUMMARY_START@@@/,/@@@K6_SUMMARY_END@@@/p' /tmp/k6-full.log \
+              | sed '1d;$d' > /tmp/k6-summary.json
           else
-            echo "ERROR: k6 summary marker not found in logs"
+            echo "ERROR: k6 summary delimiters not found in logs"
             exit 1
           fi
+
+          echo "Parsed summary:"
+          cat /tmp/k6-summary.json
+          echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+          echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+          PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
+          if [ "$PASSED" != "true" ]; then
+            echo "k6 thresholds failed — refusing traffic flip"
+            exit 1
+          fi
+          echo "k6 thresholds PASSED — proceeding to flip"
 
       - name: Flip Services to Green
         run: |

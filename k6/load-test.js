@@ -83,11 +83,12 @@ export function handleSummary(data) {
     thresholds_passed: allThresholdsPassed(data.thresholds),
   };
 
-  // Print a single-line marker so GitHub Actions can parse logs
-  // (kubectl cp fails on Succeeded/Failed pods)
-  console.log('K6_SUMMARY_JSON=' + JSON.stringify(summary));
-
+  // Delimiters on their own lines — easy to extract from kubectl logs
+  // (do NOT use console.log; k6 wraps it and escapes quotes)
   return {
-    stdout: 'k6 summary written to log marker K6_SUMMARY_JSON\n',
+    stdout:
+      '@@@K6_SUMMARY_START@@@\n' +
+      JSON.stringify(summary) +
+      '\n@@@K6_SUMMARY_END@@@\n',
   };
 }

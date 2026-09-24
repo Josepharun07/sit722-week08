@@ -157,29 +157,26 @@ jobs:
           echo "k6 pod: $K6_POD"
           kubectl logs "$K6_POD" -n monitoring | tee /tmp/k6-full.log
 
-          # Parse marker printed by handleSummary (kubectl cp cannot read Succeeded pods)
-          if grep -q 'K6_SUMMARY_JSON=' /tmp/k6-full.log; then
-            grep 'K6_SUMMARY_JSON=' /tmp/k6-full.log | tail -1 | sed 's/^.*K6_SUMMARY_JSON=//' > /tmp/k6-summary.json
-            cat /tmp/k6-summary.json
-            echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
-            echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
-            PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
-            if [ "$PASSED" != "true" ]; then
-              echo "k6 thresholds failed — refusing traffic flip"
-              exit 1
-            fi
-          else
-            # Fallback: if job succeeded and thresholds printed OK in k6 output
-            if grep -q 'thresholds.*✓\|checks_total' /tmp/k6-full.log || grep -q '✓' /tmp/k6-full.log; then
-              echo "K6_P95=see-logs" >> "$GITHUB_ENV"
-              echo "K6_ERR=see-logs" >> "$GITHUB_ENV"
-              echo "WARNING: marker missing but job completed — checking job status"
-              kubectl get job k6-load-test -n monitoring -o jsonpath='{.status.succeeded}' | grep -q 1
-            else
-              echo "ERROR: k6 summary marker not found"
-              exit 1
-            fi
+          if ! grep -q '@@@K6_SUMMARY_START@@@' /tmp/k6-full.log; then
+            echo "ERROR: k6 summary delimiters not found in logs"
+            exit 1
           fi
+
+          sed -n '/@@@K6_SUMMARY_START@@@/,/@@@K6_SUMMARY_END@@@/p' /tmp/k6-full.log \
+            | sed '1d;$d' > /tmp/k6-summary.json
+
+          echo "Parsed summary:"
+          cat /tmp/k6-summary.json
+          jq . /tmp/k6-summary.json > /dev/null
+
+          echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+          echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+          PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
+          if [ "$PASSED" != "true" ]; then
+            echo "k6 thresholds failed — refusing traffic flip"
+            exit 1
+          fi
+          echo "k6 thresholds PASSED — proceeding to flip"
 
       - name: Flip Services to Green
         run: |
