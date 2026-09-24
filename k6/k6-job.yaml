@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-load-test
+  namespace: monitoring
+  labels:
+    app: k6-load-test
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: grafana/k6:0.50.0
+          command:
+            - k6
+            - run
+            - --out
+            - experimental-prometheus-rw
+            - /scripts/load-test.js
+          env:
+            - name: SERVICE_URL
+              value: "http://user-service.production-green.svc.cluster.local:8000"
+            - name: K6_PROMETHEUS_RW_SERVER_URL
+              value: "http://pushgateway.monitoring.svc.cluster.local:9091/metrics/job/k6"
+            - name: K6_PROMETHEUS_RW_PUSH_INTERVAL
+              value: "5s"
+          volumeMounts:
+            - name: k6-scripts
+              mountPath: /scripts
+      volumes:
+        - name: k6-scripts
+          configMap:
+            name: k6-load-test-script

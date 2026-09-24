@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: production-blue
+  labels:
+    app: frontend
+    slot: blue
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+      slot: blue
+  template:
+    metadata:
+      labels:
+        app: frontend
+        slot: blue
+    spec:
+      containers:
+        - name: frontend
+          image: placeholder
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 5

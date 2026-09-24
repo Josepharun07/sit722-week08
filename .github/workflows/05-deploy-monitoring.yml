@@ -1,0 +1,98 @@
+name: 05 - Deploy Monitoring Stack
+
+on:
+  workflow_run:
+    workflows: ["04 - Deploy to Production"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy-monitoring:
+    name: Deploy Prometheus + Grafana
+    runs-on: ubuntu-latest
+    if: >
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Create Alertmanager SMTP secret
+        run: |
+          kubectl create secret generic alertmanager-secret \
+            --namespace monitoring \
+            --from-literal=GMAIL_USERNAME="${{ secrets.GMAIL_USERNAME }}" \
+            --from-literal=GMAIL_APP_PASSWORD="${{ secrets.GMAIL_APP_PASSWORD }}" \
+            --from-literal=NOTIFICATION_EMAIL="${{ secrets.NOTIFICATION_EMAIL }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create Grafana admin secret
+        run: |
+          kubectl create secret generic grafana-secret \
+            --namespace monitoring \
+            --from-literal=GRAFANA_ADMIN_PASSWORD="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply monitoring stack
+        run: kubectl apply -f kubernetes/monitoring/
+
+      - name: Wait for Prometheus
+        run: kubectl rollout status deployment/prometheus -n monitoring --timeout=180s
+
+      - name: Wait for Grafana
+        run: kubectl rollout status deployment/grafana -n monitoring --timeout=180s
+
+      - name: Wait for Alertmanager
+        run: kubectl rollout status deployment/alertmanager -n monitoring --timeout=120s
+
+      - name: Get Grafana external IP
+        run: |
+          for i in {1..30}; do
+            GRAFANA_IP=$(kubectl get svc grafana -n monitoring \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            if [ -n "$GRAFANA_IP" ]; then
+              echo "GRAFANA_IP=$GRAFANA_IP" >> "$GITHUB_ENV"
+              echo "Grafana available at: http://$GRAFANA_IP"
+              break
+            fi
+            echo "Waiting for Grafana IP... ($i/30)"
+            sleep 10
+          done
+
+      - name: Show monitoring resources
+        run: |
+          kubectl get pods -n monitoring
+          kubectl get services -n monitoring
+
+      - name: Send monitoring deployment email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: KoalaTech CI/CD <${{ secrets.GMAIL_USERNAME }}>
+          subject: "[${{ job.status }}] KoalaTech Monitoring Stack Deployed"
+          html_body: |
+            <h2>Monitoring Stack Deployment - ${{ job.status }}</h2>
+            <p><b>Grafana:</b> <a href="http://${{ env.GRAFANA_IP }}">http://${{ env.GRAFANA_IP }}</a></p>
+            <p><b>Components:</b> Prometheus, Grafana (4 dashboards), Alertmanager, kube-state-metrics, node-exporter, Pushgateway</p>
+            <p><b>Commit:</b> ${{ github.sha }}</p>
+            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View workflow run</a></p>

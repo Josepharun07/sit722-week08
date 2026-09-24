@@ -1,0 +1,179 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.gmail.com:587'
+      smtp_from: 'GMAIL_FROM_PLACEHOLDER'
+      smtp_auth_username: 'GMAIL_FROM_PLACEHOLDER'
+      smtp_auth_password: 'GMAIL_PASSWORD_PLACEHOLDER'
+      smtp_require_tls: true
+      resolve_timeout: 5m
+
+    route:
+      group_by: ['alertname', 'kubernetes_namespace', 'service']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: email-warning
+      routes:
+        - match:
+            severity: critical
+          receiver: email-critical
+          group_wait: 10s
+          repeat_interval: 1h
+        - match:
+            severity: warning
+          receiver: email-warning
+          group_wait: 60s
+          repeat_interval: 6h
+
+    receivers:
+      - name: email-critical
+        email_configs:
+          - to: 'NOTIFICATION_EMAIL_PLACEHOLDER'
+            send_resolved: true
+            headers:
+              Subject: '[CRITICAL] KoalaTech AKS: {{ .GroupLabels.alertname }}'
+            html: |
+              <h2 style="color:#c0392b;">CRITICAL Alert - KoalaTech AKS</h2>
+              {{ range .Alerts }}
+              <p><b>Alert:</b> {{ .Labels.alertname }}</p>
+              <p><b>Namespace:</b> {{ .Labels.kubernetes_namespace }}</p>
+              <p><b>Summary:</b> {{ .Annotations.summary }}</p>
+              <p><b>Detail:</b> {{ .Annotations.description }}</p>
+              {{ end }}
+
+      - name: email-warning
+        email_configs:
+          - to: 'NOTIFICATION_EMAIL_PLACEHOLDER'
+            send_resolved: true
+            headers:
+              Subject: '[WARNING] KoalaTech AKS: {{ .GroupLabels.alertname }}'
+            html: |
+              <h2 style="color:#e67e22;">WARNING Alert - KoalaTech AKS</h2>
+              {{ range .Alerts }}
+              <p><b>Alert:</b> {{ .Labels.alertname }}</p>
+              <p><b>Summary:</b> {{ .Annotations.summary }}</p>
+              {{ end }}
+
+    inhibit_rules:
+      - source_match:
+          severity: critical
+        target_match:
+          severity: warning
+        equal: ['alertname', 'kubernetes_namespace', 'service']
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9093"
+    spec:
+      initContainers:
+        - name: inject-smtp-credentials
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              cp /etc/alertmanager-template/alertmanager.yml /etc/alertmanager/alertmanager.yml
+              sed -i "s/GMAIL_FROM_PLACEHOLDER/${GMAIL_USERNAME}/g"            /etc/alertmanager/alertmanager.yml
+              sed -i "s/GMAIL_PASSWORD_PLACEHOLDER/${GMAIL_APP_PASSWORD}/g"    /etc/alertmanager/alertmanager.yml
+              sed -i "s/NOTIFICATION_EMAIL_PLACEHOLDER/${NOTIFICATION_EMAIL}/g" /etc/alertmanager/alertmanager.yml
+          env:
+            - name: GMAIL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: alertmanager-secret
+                  key: GMAIL_USERNAME
+            - name: GMAIL_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alertmanager-secret
+                  key: GMAIL_APP_PASSWORD
+            - name: NOTIFICATION_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: alertmanager-secret
+                  key: NOTIFICATION_EMAIL
+          volumeMounts:
+            - name: alertmanager-template
+              mountPath: /etc/alertmanager-template
+            - name: alertmanager-patched
+              mountPath: /etc/alertmanager
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0
+          args:
+            - "--config.file=/etc/alertmanager/alertmanager.yml"
+            - "--storage.path=/alertmanager-data"
+            - "--web.external-url=http://alertmanager:9093"
+          ports:
+            - containerPort: 9093
+              name: http
+          volumeMounts:
+            - name: alertmanager-patched
+              mountPath: /etc/alertmanager
+            - name: alertmanager-storage
+              mountPath: /alertmanager-data
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9093
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9093
+            initialDelaySeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: alertmanager-template
+          configMap:
+            name: alertmanager-config
+        - name: alertmanager-patched
+          emptyDir: {}
+        - name: alertmanager-storage
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
+spec:
+  type: ClusterIP
+  selector:
+    app: alertmanager
+  ports:
+    - name: http
+      port: 9093
+      targetPort: 9093

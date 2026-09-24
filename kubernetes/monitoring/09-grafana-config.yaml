@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: "15s"
+          httpMethod: POST
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: koalatech
+        orgId: 1
+        folder: KoalaTech
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-service-health
+  namespace: monitoring
+data:
+  service-health.json: |
+    {
+      "title": "KoalaTech Service Health",
+      "uid": "koalatech-svc-health",
+      "tags": ["koalatech","services"],
+      "refresh": "30s",
+      "time": {"from":"now-1h","to":"now"},
+      "panels": [
+        {"id":1,"title":"HTTP Request Rate (req/s)","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":0},
+         "targets":[{"expr":"sum by (service) (rate(http_requests_total[2m]))","legendFormat":"{{service}}"}]},
+        {"id":2,"title":"HTTP Error Rate (%)","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":0},
+         "targets":[{"expr":"sum by (service) (rate(http_requests_total{status=~\"5..\"}[2m])) / sum by (service) (rate(http_requests_total[2m])) * 100","legendFormat":"{{service}} error %"}]},
+        {"id":3,"title":"P95 Latency (s)","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":8},
+         "targets":[{"expr":"histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket[5m])))","legendFormat":"{{service}} P95"}]},
+        {"id":4,"title":"Service Uptime","type":"stat","gridPos":{"h":4,"w":24,"x":0,"y":16},
+         "targets":[{"expr":"up{job=\"kubernetes-pods\"}","legendFormat":"{{service}} ({{kubernetes_namespace}})"}]}
+      ]
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-k8s-cluster
+  namespace: monitoring
+data:
+  k8s-cluster.json: |
+    {
+      "title": "KoalaTech Kubernetes Cluster",
+      "uid": "koalatech-k8s-cluster",
+      "tags": ["koalatech","kubernetes"],
+      "refresh": "30s",
+      "time": {"from":"now-1h","to":"now"},
+      "panels": [
+        {"id":1,"title":"Pod Status by Namespace","type":"stat","gridPos":{"h":6,"w":24,"x":0,"y":0},
+         "targets":[{"expr":"count by (namespace, phase) (kube_pod_status_phase)","legendFormat":"{{namespace}} / {{phase}}"}]},
+        {"id":2,"title":"Node CPU Usage (%)","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":6},
+         "targets":[{"expr":"100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[2m])) * 100)","legendFormat":"{{instance}}"}]},
+        {"id":3,"title":"Node Memory Usage (%)","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":6},
+         "targets":[{"expr":"(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100","legendFormat":"{{instance}}"}]},
+        {"id":4,"title":"Pod Restarts (last 1h)","type":"timeseries","gridPos":{"h":8,"w":24,"x":0,"y":14},
+         "targets":[{"expr":"increase(kube_pod_container_status_restarts_total[1h]) > 0","legendFormat":"{{namespace}}/{{pod}}"}]}
+      ]
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-blue-green
+  namespace: monitoring
+data:
+  blue-green.json: |
+    {
+      "title": "KoalaTech Blue/Green Deployment",
+      "uid": "koalatech-blue-green",
+      "tags": ["koalatech","deployment"],
+      "refresh": "15s",
+      "time": {"from":"now-3h","to":"now"},
+      "panels": [
+        {"id":1,"title":"Blue Pods Ready","type":"stat","gridPos":{"h":5,"w":12,"x":0,"y":0},
+         "targets":[{"expr":"sum(kube_deployment_status_replicas_ready{namespace=\"production-blue\"})","legendFormat":"Blue Ready"}]},
+        {"id":2,"title":"Green Pods Ready","type":"stat","gridPos":{"h":5,"w":12,"x":12,"y":0},
+         "targets":[{"expr":"sum(kube_deployment_status_replicas_ready{namespace=\"production-green\"})","legendFormat":"Green Ready"}]},
+        {"id":3,"title":"Blue HTTP Request Rate","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":5},
+         "targets":[{"expr":"sum by (service) (rate(http_requests_total{kubernetes_namespace=\"production-blue\"}[2m]))","legendFormat":"blue/{{service}}"}]},
+        {"id":4,"title":"Green HTTP Request Rate","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":5},
+         "targets":[{"expr":"sum by (service) (rate(http_requests_total{kubernetes_namespace=\"production-green\"}[2m]))","legendFormat":"green/{{service}}"}]},
+        {"id":5,"title":"Green P95 Latency vs 500ms SLA","type":"timeseries","gridPos":{"h":8,"w":24,"x":0,"y":13},
+         "targets":[
+           {"expr":"histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{kubernetes_namespace=\"production-green\"}[5m])))","legendFormat":"Green P95 {{service}}"},
+           {"expr":"vector(0.5)","legendFormat":"SLA (500ms)"}
+         ]}
+      ]
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-k6
+  namespace: monitoring
+data:
+  k6-load-test.json: |
+    {
+      "title": "KoalaTech k6 Load Test Results",
+      "uid": "koalatech-k6",
+      "tags": ["koalatech","k6"],
+      "refresh": "10s",
+      "time": {"from":"now-30m","to":"now"},
+      "panels": [
+        {"id":1,"title":"Virtual Users","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":0},
+         "targets":[{"expr":"k6_vus","legendFormat":"Active VUs"}]},
+        {"id":2,"title":"Request Rate (req/s)","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":0},
+         "targets":[{"expr":"rate(k6_http_reqs_total[30s])","legendFormat":"Requests/s"}]},
+        {"id":3,"title":"P95 Response Time vs 500ms SLA","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":8},
+         "targets":[
+           {"expr":"k6_http_req_duration_p95","legendFormat":"P95 Duration"},
+           {"expr":"vector(500)","legendFormat":"SLA (500ms)"}
+         ]},
+        {"id":4,"title":"Error Rate (%)","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":8},
+         "targets":[{"expr":"rate(k6_http_req_failed_total[30s]) / rate(k6_http_reqs_total[30s]) * 100","legendFormat":"Error %"}]},
+        {"id":5,"title":"Check Pass Rate","type":"stat","gridPos":{"h":4,"w":24,"x":0,"y":16},
+         "targets":[{"expr":"k6_checks_total{result=\"pass\"} / (k6_checks_total{result=\"pass\"} + k6_checks_total{result=\"fail\"}) * 100","legendFormat":"Pass rate %"}]}
+      ]
+    }
