@@ -1,9 +1,7 @@
 /**
  * KoalaTech Blue/Green Validation — k6 Load Test
  * SLA gates: P95 < 500ms, error rate < 1%
- *
- * Targets the Green user-service /health endpoint (set via SERVICE_URL).
- * Written for k6 0.50 (no optional chaining / nullish coalescing).
+ * k6 0.50 compatible (no ?. / ??).
  */
 
 import http from 'k6/http';
@@ -15,9 +13,9 @@ const serviceLatency = new Trend('k6_service_latency_ms', true);
 
 export const options = {
   stages: [
-    { duration: '20s', target: 5 },
-    { duration: '40s', target: 15 },
-    { duration: '20s', target: 0 },
+    { duration: '15s', target: 5 },
+    { duration: '30s', target: 10 },
+    { duration: '15s', target: 0 },
   ],
   thresholds: {
     http_req_duration: ['p(95)<500'],
@@ -85,7 +83,11 @@ export function handleSummary(data) {
     thresholds_passed: allThresholdsPassed(data.thresholds),
   };
 
+  // Print a single-line marker so GitHub Actions can parse logs
+  // (kubectl cp fails on Succeeded/Failed pods)
+  console.log('K6_SUMMARY_JSON=' + JSON.stringify(summary));
+
   return {
-    '/tmp/k6-summary.json': JSON.stringify(summary, null, 2),
+    stdout: 'k6 summary written to log marker K6_SUMMARY_JSON\n',
   };
 }

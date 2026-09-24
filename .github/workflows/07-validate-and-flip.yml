@@ -1,41 +1,29 @@
 name: 07 - Validate Green + Flip Traffic
 
+# Manual re-run only. Automatic path is now inside workflow 06 (after 05).
+
 on:
-  workflow_run:
-    workflows: ["06 - Deploy to Green"]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Git SHA currently on Green (optional for auto runs)"
+        description: "Git SHA currently on Green (for email subject)"
         required: false
         type: string
+        default: "manual-rerun"
 
 jobs:
   validate-and-flip:
     name: k6 Load Test + Traffic Flip
     runs-on: ubuntu-latest
     environment: production
-    if: >
-      ${{ github.event_name == 'workflow_dispatch' ||
-          github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Resolve image tag
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.image_tag }}" ]; then
-            TAG="${{ inputs.image_tag }}"
-          else
-            TAG="${{ github.event.workflow_run.head_sha || github.sha }}"
-          fi
-          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
-          echo "Using image tag: $TAG"
+          echo "IMAGE_TAG=${{ inputs.image_tag }}" >> "$GITHUB_ENV"
 
       - name: Login to Azure
         uses: azure/login@v3
@@ -63,8 +51,7 @@ jobs:
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].status.podIP}')
           if [ -z "$GREEN_POD_IP" ]; then
-            echo "ERROR: No Running green user-service pod found."
-            kubectl get pods -n production -l slot=green -o wide
+            echo "ERROR: No Running green user-service pod found. Run workflow 06 first."
             exit 1
           fi
           echo "Testing green user-service at $GREEN_POD_IP:8000"
@@ -72,16 +59,14 @@ jobs:
           sed "s|REPLACE_SERVICE_URL|http://${GREEN_POD_IP}:8000|g" k6/k6-job.yaml | kubectl apply -f -
           kubectl wait --for=condition=complete job/k6-load-test -n monitoring --timeout=300s
 
-      - name: Collect k6 results
-        if: always()
+      - name: Collect k6 results from logs
         run: |
           K6_POD=$(kubectl get pods -n monitoring -l job-name=k6-load-test \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          if [ -n "$K6_POD" ]; then
-            kubectl logs "$K6_POD" -n monitoring || true
-            kubectl cp "monitoring/$K6_POD:/tmp/k6-summary.json" /tmp/k6-summary.json || true
-          fi
-          if [ -f /tmp/k6-summary.json ]; then
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl logs "$K6_POD" -n monitoring | tee /tmp/k6-full.log
+
+          if grep -q 'K6_SUMMARY_JSON=' /tmp/k6-full.log; then
+            grep 'K6_SUMMARY_JSON=' /tmp/k6-full.log | tail -1 | sed 's/^.*K6_SUMMARY_JSON=//' > /tmp/k6-summary.json
             cat /tmp/k6-summary.json
             echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
             echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
@@ -91,7 +76,7 @@ jobs:
               exit 1
             fi
           else
-            echo "WARNING: k6 summary not found — refusing traffic flip"
+            echo "ERROR: k6 summary marker not found in logs"
             exit 1
           fi
 
@@ -103,13 +88,11 @@ jobs:
             kubectl patch service "$svc" -n production --type=merge \
               -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"green\"}}}"
           done
-          echo "Traffic flipped to Green slot"
 
       - name: Smoke-test frontend after flip
         run: |
           FRONTEND_IP=$(kubectl get svc frontend -n production \
             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          echo "Frontend IP: $FRONTEND_IP"
           curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP" || true
 
       - name: Send Success Email
@@ -126,10 +109,8 @@ jobs:
           subject: "[SUCCESS] Traffic Flipped to Green — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
             <h2 style="color:#27ae60;">Traffic Successfully Flipped to Green</h2>
-            <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
-            <p><b>k6 P95 Latency:</b> ${{ env.K6_P95 }} ms (SLA: &lt;500ms)</p>
+            <p><b>k6 P95:</b> ${{ env.K6_P95 }} ms</p>
             <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
-            <p>Blue pods remain online as hot-standby. To rollback, run workflow 08 manually.</p>
 
       - name: Send Failure Alert Email
         if: failure()
@@ -145,7 +126,3 @@ jobs:
           subject: "[CRITICAL] k6 Validation FAILED — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
             <h2 style="color:#c0392b;">k6 Load Test FAILED — Traffic NOT flipped</h2>
-            <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
-            <p><b>k6 P95:</b> ${{ env.K6_P95 }}</p>
-            <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
-            <p>Blue environment remains live. Run workflow 08 to clean up Green if needed.</p>
