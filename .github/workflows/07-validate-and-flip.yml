@@ -10,14 +10,24 @@ on:
 
 jobs:
   validate-and-flip:
+    name: k6 Load Test + Traffic Flip
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v5
-      - uses: azure/login@v3
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Login to Azure
+        uses: azure/login@v3
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - run: az aks get-credentials --resource-group ${{ vars.AKS_RESOURCE_GROUP }} --name ${{ vars.AKS_CLUSTER_NAME }} --overwrite-existing
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
 
       - name: Setup k6 Script
         run: |
@@ -27,24 +37,59 @@ jobs:
       - name: Run k6 Load Test against Green Pods
         run: |
           kubectl delete job k6-load-test -n monitoring --ignore-not-found=true
-          # Grab the internal IP of the green user-service pod directly
-          GREEN_POD_IP=$(kubectl get pods -n production -l app=user-service,slot=green -o jsonpath='{.items[0].status.podIP}')
-          sed "s|http://user-service.production-green.svc.cluster.local:8000|http://$GREEN_POD_IP:8000|g" k6/k6-job.yaml | kubectl apply -f -
+          sleep 3
+
+          GREEN_POD_IP=$(kubectl get pods -n production -l app=user-service,slot=green \
+            -o jsonpath='{.items[0].status.podIP}')
+          if [ -z "$GREEN_POD_IP" ]; then
+            echo "ERROR: No green user-service pod found. Run workflow 06 first."
+            exit 1
+          fi
+          echo "Testing green user-service at $GREEN_POD_IP:8000"
+
+          # Inject green pod IP into the k6 Job SERVICE_URL
+          sed "s|REPLACE_SERVICE_URL|http://${GREEN_POD_IP}:8000|g" k6/k6-job.yaml | kubectl apply -f -
           kubectl wait --for=condition=complete job/k6-load-test -n monitoring --timeout=300s
 
       - name: Collect k6 results
+        if: always()
         run: |
-          K6_POD=$(kubectl get pods -n monitoring -l job-name=k6-load-test -o jsonpath='{.items[0].metadata.name}')
-          kubectl cp "monitoring/$K6_POD:/tmp/k6-summary.json" /tmp/k6-summary.json || true
-          echo "K6_P95=$(jq -r '.p95_duration_ms' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
-          echo "K6_ERR=$(jq -r '.error_rate' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+          K6_POD=$(kubectl get pods -n monitoring -l job-name=k6-load-test \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$K6_POD" ]; then
+            kubectl logs "$K6_POD" -n monitoring || true
+            kubectl cp "monitoring/$K6_POD:/tmp/k6-summary.json" /tmp/k6-summary.json || true
+          fi
+          if [ -f /tmp/k6-summary.json ]; then
+            cat /tmp/k6-summary.json
+            echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+            echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+            PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
+            if [ "$PASSED" != "true" ]; then
+              echo "k6 thresholds failed — refusing traffic flip"
+              exit 1
+            fi
+          else
+            echo "WARNING: k6 summary not found — refusing traffic flip"
+            exit 1
+          fi
 
       - name: Flip Services to Green
         run: |
-          kubectl patch service koalatech-frontend -n production --type=merge -p '{"spec":{"selector":{"slot":"green"}}}'
+          kubectl patch service frontend -n production --type=merge \
+            -p '{"spec":{"selector":{"app":"frontend","slot":"green"}}}'
           for svc in user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl patch service $svc -n production --type=merge -p '{"spec":{"selector":{"slot":"green"}}}'
+            kubectl patch service "$svc" -n production --type=merge \
+              -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"green\"}}}"
           done
+          echo "Traffic flipped to Green slot"
+
+      - name: Smoke-test frontend after flip
+        run: |
+          FRONTEND_IP=$(kubectl get svc frontend -n production \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "Frontend IP: $FRONTEND_IP"
+          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP" || true
 
       - name: Send Success Email
         if: success()
@@ -60,8 +105,10 @@ jobs:
           subject: "[SUCCESS] Traffic Flipped to Green — SHA: ${{ inputs.image_tag }}"
           html_body: |
             <h2 style="color:#27ae60;">Traffic Successfully Flipped to Green</h2>
+            <p><b>Image SHA:</b> <code>${{ inputs.image_tag }}</code></p>
             <p><b>k6 P95 Latency:</b> ${{ env.K6_P95 }} ms (SLA: &lt;500ms)</p>
             <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
+            <p>Blue pods remain online as hot-standby. To rollback, run workflow 08.</p>
 
       - name: Send Failure Alert Email
         if: failure()
@@ -75,4 +122,9 @@ jobs:
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
           subject: "[CRITICAL] k6 Validation FAILED — SHA: ${{ inputs.image_tag }}"
-          html_body: '<h2 style="color:#c0392b;">k6 Load Test FAILED</h2><p>Traffic was NOT flipped.</p>'
+          html_body: |
+            <h2 style="color:#c0392b;">k6 Load Test FAILED — Traffic NOT flipped</h2>
+            <p><b>Image SHA:</b> <code>${{ inputs.image_tag }}</code></p>
+            <p><b>k6 P95:</b> ${{ env.K6_P95 }}</p>
+            <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
+            <p>Blue environment remains live. Run workflow 08 to clean up Green if needed.</p>

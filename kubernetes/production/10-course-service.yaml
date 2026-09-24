@@ -3,15 +3,24 @@ kind: Deployment
 metadata:
   name: course-service
   namespace: production
+  labels:
+    app: course-service
+    slot: blue
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: course-service
+      slot: blue
   template:
     metadata:
       labels:
         app: course-service
+        slot: blue
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: course-service
@@ -43,16 +52,31 @@ spec:
                   key: JWT_SECRET_KEY
             - name: JWT_ALGORITHM
               value: HS256
-
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: course-service
   namespace: production
+  labels:
+    app: course-service
 spec:
   selector:
     app: course-service
+    slot: blue
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000

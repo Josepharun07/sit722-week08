@@ -171,11 +171,11 @@ data:
         rules:
           - alert: GreenPodsNotReady
             expr: |
-              kube_deployment_status_replicas_ready{namespace="production-green"}
-              < kube_deployment_spec_replicas{namespace="production-green"}
+              kube_deployment_status_replicas_ready{namespace="production", deployment=~".*-green"}
+              < kube_deployment_spec_replicas{namespace="production", deployment=~".*-green"}
             for: 10m
             labels:
               severity: critical
             annotations:
               summary: "Green pods not fully ready after 10 minutes"
-              description: "Deployment {{ $labels.deployment }} in production-green is not fully ready."
+              description: "Deployment {{ $labels.deployment }} in production (green slot) is not fully ready."

@@ -120,6 +120,12 @@ app = FastAPI(
 app.include_router(auth.router)
 app.include_router(users.router)
 
+Instrumentator(
+    should_group_status_codes=False,
+    should_ignore_untemplated=True,
+    excluded_handlers=["/metrics", "/health", "/"],
+).instrument(app).expose(app, include_in_schema=False)
+
 
 @app.get(
     "/",

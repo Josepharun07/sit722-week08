@@ -104,16 +104,16 @@ data:
       "time": {"from":"now-3h","to":"now"},
       "panels": [
         {"id":1,"title":"Blue Pods Ready","type":"stat","gridPos":{"h":5,"w":12,"x":0,"y":0},
-         "targets":[{"expr":"sum(kube_deployment_status_replicas_ready{namespace=\"production-blue\"})","legendFormat":"Blue Ready"}]},
+         "targets":[{"expr":"sum(kube_deployment_status_replicas_ready{namespace=\"production\",deployment!~\".*-green\"})","legendFormat":"Blue Ready"}]},
         {"id":2,"title":"Green Pods Ready","type":"stat","gridPos":{"h":5,"w":12,"x":12,"y":0},
-         "targets":[{"expr":"sum(kube_deployment_status_replicas_ready{namespace=\"production-green\"})","legendFormat":"Green Ready"}]},
+         "targets":[{"expr":"sum(kube_deployment_status_replicas_ready{namespace=\"production\",deployment=~\".*-green\"})","legendFormat":"Green Ready"}]},
         {"id":3,"title":"Blue HTTP Request Rate","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":5},
-         "targets":[{"expr":"sum by (service) (rate(http_requests_total{kubernetes_namespace=\"production-blue\"}[2m]))","legendFormat":"blue/{{service}}"}]},
+         "targets":[{"expr":"sum by (service) (rate(http_requests_total{kubernetes_namespace=\"production\",slot=\"blue\"}[2m]))","legendFormat":"blue/{{service}}"}]},
         {"id":4,"title":"Green HTTP Request Rate","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":5},
-         "targets":[{"expr":"sum by (service) (rate(http_requests_total{kubernetes_namespace=\"production-green\"}[2m]))","legendFormat":"green/{{service}}"}]},
+         "targets":[{"expr":"sum by (service) (rate(http_requests_total{kubernetes_namespace=\"production\",slot=\"green\"}[2m]))","legendFormat":"green/{{service}}"}]},
         {"id":5,"title":"Green P95 Latency vs 500ms SLA","type":"timeseries","gridPos":{"h":8,"w":24,"x":0,"y":13},
          "targets":[
-           {"expr":"histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{kubernetes_namespace=\"production-green\"}[5m])))","legendFormat":"Green P95 {{service}}"},
+           {"expr":"histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{kubernetes_namespace=\"production\",slot=\"green\"}[5m])))","legendFormat":"Green P95 {{service}}"},
            {"expr":"vector(0.5)","legendFormat":"SLA (500ms)"}
          ]}
       ]

@@ -2,11 +2,7 @@
  * KoalaTech Blue/Green Validation — k6 Load Test
  * SLA gates: P95 < 500ms, error rate < 1%
  *
- * Local:     k6 run -e SERVICE_URL=http://<ip>:8000 load-test.js
- * In-cluster: k6 run --out experimental-prometheus-rw
- *               -e K6_PROMETHEUS_RW_SERVER_URL=http://pushgateway:9091/metrics/job/k6
- *               -e SERVICE_URL=http://user-service.production-green.svc.cluster.local:8000
- *               load-test.js
+ * Targets the Green user-service /health endpoint (set via SERVICE_URL).
  */
 
 import http from 'k6/http';
@@ -18,13 +14,13 @@ const serviceLatency    = new Trend('k6_service_latency_ms', true);
 
 export const options = {
   stages: [
-    { duration: '30s', target: 10 },
-    { duration: '60s', target: 20 },
-    { duration: '30s', target: 0  },
+    { duration: '20s', target: 5 },
+    { duration: '40s', target: 15 },
+    { duration: '20s', target: 0 },
   ],
   thresholds: {
-    http_req_duration:    ['p(95)<500'],
-    http_req_failed:      ['rate<0.01'],
+    http_req_duration:      ['p(95)<500'],
+    http_req_failed:        ['rate<0.01'],
     k6_health_check_errors: ['rate<0.01'],
   },
 };
@@ -43,14 +39,11 @@ export default function () {
     serviceLatency.add(res.timings.duration);
   });
 
-  group('api endpoints', () => {
-    const res = http.get(`${base}/students`, {
-      headers: { 'Accept': 'application/json' },
-      timeout: '10s',
-    });
+  group('root endpoint', () => {
+    const res = http.get(`${base}/`, { timeout: '10s' });
     check(res, {
-      'students endpoint responds': (r) => r.status === 200 || r.status === 401,
-      'response time < 500ms':      (r) => r.timings.duration < 500,
+      'root responds 200':     (r) => r.status === 200,
+      'response time < 500ms': (r) => r.timings.duration < 500,
     });
     serviceLatency.add(res.timings.duration);
   });

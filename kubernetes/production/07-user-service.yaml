@@ -3,15 +3,24 @@ kind: Deployment
 metadata:
   name: user-service
   namespace: production
+  labels:
+    app: user-service
+    slot: blue
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: user-service
+      slot: blue
   template:
     metadata:
       labels:
         app: user-service
+        slot: blue
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: user-service
@@ -60,16 +69,31 @@ spec:
                 secretKeyRef:
                   name: application-secret
                   key: DEFAULT_ADMIN_PASSWORD
-
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: user-service
   namespace: production
+  labels:
+    app: user-service
 spec:
   selector:
     app: user-service
+    slot: blue
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000

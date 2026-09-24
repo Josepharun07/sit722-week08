@@ -3,15 +3,24 @@ kind: Deployment
 metadata:
   name: lecturer-service
   namespace: production
+  labels:
+    app: lecturer-service
+    slot: blue
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: lecturer-service
+      slot: blue
   template:
     metadata:
       labels:
         app: lecturer-service
+        slot: blue
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: lecturer-service
@@ -50,16 +59,31 @@ spec:
                   key: AZURE_STORAGE_CONNECTION_STRING
             - name: AZURE_STORAGE_CONTAINER_NAME
               value: lecturer-profile-photo
-
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: lecturer-service
   namespace: production
+  labels:
+    app: lecturer-service
 spec:
   selector:
     app: lecturer-service
+    slot: blue
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000

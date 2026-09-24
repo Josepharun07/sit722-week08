@@ -5,29 +5,50 @@ on:
 
 jobs:
   rollback:
+    name: Instant Rollback
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v5
-      - uses: azure/login@v3
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Login to Azure
+        uses: azure/login@v3
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - run: az aks get-credentials --resource-group ${{ vars.AKS_RESOURCE_GROUP }} --name ${{ vars.AKS_CLUSTER_NAME }} --overwrite-existing
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
 
       - name: Patch Services back to Blue
         run: |
-          kubectl patch service koalatech-frontend -n production --type=merge -p '{"spec":{"selector":{"slot":"blue"}}}'
+          kubectl patch service frontend -n production --type=merge \
+            -p '{"spec":{"selector":{"app":"frontend","slot":"blue"}}}'
           for svc in user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl patch service $svc -n production --type=merge -p '{"spec":{"selector":{"slot":"blue"}}}'
+            kubectl patch service "$svc" -n production --type=merge \
+              -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"blue\"}}}"
           done
+          echo "Traffic reverted to Blue slot"
+
+      - name: Smoke-test frontend after rollback
+        run: |
+          FRONTEND_IP=$(kubectl get svc frontend -n production \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "Frontend IP: $FRONTEND_IP"
+          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP" || true
 
       - name: Scale Green to zero
         run: |
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl scale deployment/$svc-green -n production --replicas=0 --ignore-not-found=true
+            kubectl scale deployment/${svc}-green -n production --replicas=0 --ignore-not-found=true
           done
 
       - name: Send Rollback Email
+        if: always()
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -38,4 +59,8 @@ jobs:
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
           subject: "[ROLLBACK] KoalaTech Production Restored to Blue"
-          html_body: '<h2 style="color:#c0392b;">Production Rollback Executed</h2>'
+          html_body: |
+            <h2 style="color:#c0392b;">Production Rollback Executed</h2>
+            <p>All services immediately reverted to the Blue slot. Green deployments scaled to 0.</p>
+            <p>Blue confirmed live. Investigate Green failure before next deployment.</p>
+            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View workflow run</a></p>

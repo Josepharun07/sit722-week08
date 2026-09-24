@@ -22,9 +22,9 @@ spec:
             - /scripts/load-test.js
           env:
             - name: SERVICE_URL
-              value: "http://user-service.production-green.svc.cluster.local:8000"
+              value: "REPLACE_SERVICE_URL"
             - name: K6_PROMETHEUS_RW_SERVER_URL
-              value: "http://pushgateway.monitoring.svc.cluster.local:9091/metrics/job/k6"
+              value: "http://prometheus.monitoring.svc.cluster.local:9090/api/v1/write"
             - name: K6_PROMETHEUS_RW_PUSH_INTERVAL
               value: "5s"
           volumeMounts:

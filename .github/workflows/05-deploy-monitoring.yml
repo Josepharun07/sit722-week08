@@ -31,6 +31,11 @@ jobs:
             --name ${{ vars.AKS_CLUSTER_NAME }} \
             --overwrite-existing
 
+      - name: Create monitoring namespace
+        run: |
+          kubectl create namespace monitoring \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Create Alertmanager SMTP secret
         run: |
           kubectl create secret generic alertmanager-secret \
@@ -47,17 +52,21 @@ jobs:
             --from-literal=GRAFANA_ADMIN_PASSWORD="${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Remove conflicting Helm monitoring (if present)
+        run: |
+          helm uninstall prometheus -n monitoring --ignore-not-found || true
+
       - name: Apply monitoring stack
         run: kubectl apply -f kubernetes/monitoring/
 
       - name: Wait for Prometheus
-        run: kubectl rollout status deployment/prometheus -n monitoring --timeout=180s
+        run: kubectl rollout status deployment/prometheus -n monitoring --timeout=300s
 
       - name: Wait for Grafana
-        run: kubectl rollout status deployment/grafana -n monitoring --timeout=180s
+        run: kubectl rollout status deployment/grafana -n monitoring --timeout=300s
 
       - name: Wait for Alertmanager
-        run: kubectl rollout status deployment/alertmanager -n monitoring --timeout=120s
+        run: kubectl rollout status deployment/alertmanager -n monitoring --timeout=180s
 
       - name: Get Grafana external IP
         run: |

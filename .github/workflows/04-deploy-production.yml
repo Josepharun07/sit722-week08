@@ -67,10 +67,13 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Apply Kubernetes manifests
+      - name: Apply Kubernetes manifests (Blue baseline)
         run: |
-          kubectl apply \
-            -f kubernetes/production/
+          # Selector labels are immutable — recreate app deployments if slot labels changed
+          for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl delete deployment "$svc" -n production --ignore-not-found=true
+          done
+          kubectl apply -f kubernetes/production/
 
       - name: Update frontend image
         run: |
@@ -149,14 +152,3 @@ jobs:
           kubectl get pods -n production
           kubectl get services -n production
           kubectl get pvc -n production
-
-      - name: Add Prometheus Helm Repo
-        run: |
-          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm repo update
-
-      - name: Deploy/Update Monitoring Stack
-        run: |
-          helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
-            --namespace monitoring \
-            --create-namespace    

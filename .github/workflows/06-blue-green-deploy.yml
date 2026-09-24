@@ -4,20 +4,30 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Git SHA to deploy"
+        description: "Git SHA to deploy to Green"
         required: true
         type: string
 
 jobs:
   deploy-green:
+    name: Deploy to Green Slot
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v5
-      - uses: azure/login@v3
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Login to Azure
+        uses: azure/login@v3
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - run: az aks get-credentials --resource-group ${{ vars.AKS_RESOURCE_GROUP }} --name ${{ vars.AKS_CLUSTER_NAME }} --overwrite-existing
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
 
       - name: Apply Base Production (DBs, Services, Blue Pods)
         run: |
@@ -30,26 +40,44 @@ jobs:
             --from-literal=POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
             --from-literal=POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
             --from-literal=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+            --from-literal=DEFAULT_ADMIN_USERNAME="${{ secrets.DEFAULT_ADMIN_USERNAME }}" \
+            --from-literal=DEFAULT_ADMIN_EMAIL="${{ secrets.DEFAULT_ADMIN_EMAIL }}" \
+            --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
             --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f kubernetes/production/
-        
+
       - name: Deploy Green Pods
-        run: kubectl apply -f kubernetes/production-green/
+        run: |
+          # Ensure green deployments use *-green names (never overwrite blue)
+          kubectl apply -f kubernetes/production-green/
 
       - name: Update Images on Green Deployments
         run: |
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl set image deployment/$svc-green $svc=${{ vars.ACR_LOGIN_SERVER }}/koalatech-$svc:${{ inputs.image_tag }} -n production
+            kubectl set image deployment/${svc}-green \
+              ${svc}=${{ vars.ACR_LOGIN_SERVER }}/koalatech-${svc}:${{ inputs.image_tag }} \
+              -n production
           done
 
       - name: Wait for Green Rollouts
         run: |
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl rollout status deployment/$svc-green -n production --timeout=300s
+            kubectl rollout status deployment/${svc}-green -n production --timeout=300s
           done
 
+      - name: Verify Green pods Running
+        run: |
+          kubectl get pods -n production -l slot=green
+          NOT_RUNNING=$(kubectl get pods -n production -l slot=green --no-headers 2>/dev/null | grep -v Running | wc -l || true)
+          if [ "$NOT_RUNNING" -gt 0 ]; then
+            echo "ERROR: $NOT_RUNNING green pod(s) not Running"
+            kubectl get pods -n production -l slot=green
+            exit 1
+          fi
+
       - name: Send Green Ready Email
+        if: always()
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -59,5 +87,10 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[READY] Green Environment Deployed — SHA: ${{ inputs.image_tag }}"
-          html_body: "<h2>Green Deployment Ready</h2><p>SHA: ${{ inputs.image_tag }}</p><p>Run Workflow 07 to validate and flip.</p>"
+          subject: "[${{ job.status }}] Green Deployment Ready — SHA: ${{ inputs.image_tag }}"
+          html_body: |
+            <h2 style="color:#27ae60;">Green Deployment - ${{ job.status }}</h2>
+            <p><b>Image SHA:</b> <code>${{ inputs.image_tag }}</code></p>
+            <p>Green pods are running in isolation. Live traffic is still on Blue.</p>
+            <p><b>Next step:</b> Run workflow 07 - Validate Green + Flip Traffic with the same SHA.</p>
+            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View workflow run</a></p>

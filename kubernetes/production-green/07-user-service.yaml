@@ -3,6 +3,9 @@ kind: Deployment
 metadata:
   name: user-service-green
   namespace: production
+  labels:
+    app: user-service
+    slot: green
 spec:
   replicas: 1
   selector:
@@ -49,3 +52,32 @@ spec:
                   key: JWT_SECRET_KEY
             - name: JWT_ALGORITHM
               value: HS256
+            - name: ACCESS_TOKEN_EXPIRE_MINUTES
+              value: "30"
+            - name: DEFAULT_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: application-secret
+                  key: DEFAULT_ADMIN_USERNAME
+            - name: DEFAULT_ADMIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: application-secret
+                  key: DEFAULT_ADMIN_EMAIL
+            - name: DEFAULT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: application-secret
+                  key: DEFAULT_ADMIN_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10

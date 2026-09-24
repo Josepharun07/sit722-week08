@@ -3,6 +3,9 @@ kind: Deployment
 metadata:
   name: frontend-green
   namespace: production
+  labels:
+    app: frontend
+    slot: green
 spec:
   replicas: 1
   selector:
@@ -21,3 +24,9 @@ spec:
           imagePullPolicy: Always
           ports:
             - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5

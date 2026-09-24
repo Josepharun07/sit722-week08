@@ -1,15 +1,4 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: grafana-pvc
-  namespace: monitoring
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 5Gi
-
----
+# NOTE: emptyDir used instead of Azure Disk PVC to avoid AKS max data-disk limits.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,6 +8,8 @@ metadata:
     app: grafana
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: grafana
@@ -96,8 +87,7 @@ spec:
               memory: 512Mi
       volumes:
         - name: grafana-storage
-          persistentVolumeClaim:
-            claimName: grafana-pvc
+          emptyDir: {}
         - name: grafana-datasources
           configMap:
             name: grafana-datasources

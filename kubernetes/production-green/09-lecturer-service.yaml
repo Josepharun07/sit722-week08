@@ -1,8 +1,11 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: lecturer-service
+  name: lecturer-service-green
   namespace: production
+  labels:
+    app: lecturer-service
+    slot: green
 spec:
   replicas: 1
   selector:
@@ -62,3 +65,9 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
