@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: production-blue
-  labels:
-    environment: production
-    slot: blue

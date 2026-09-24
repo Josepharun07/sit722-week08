@@ -4,84 +4,49 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Git SHA deployed to Green in workflow 06"
+        description: "Git SHA currently on Green"
         required: true
         type: string
 
 jobs:
   validate-and-flip:
-    name: k6 Load Test + Traffic Flip
     runs-on: ubuntu-latest
-    environment:
-      name: production
-
+    environment: production
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Login to Azure
-        uses: azure/login@v3
+      - uses: actions/checkout@v5
+      - uses: azure/login@v3
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - run: az aks get-credentials --resource-group ${{ vars.AKS_RESOURCE_GROUP }} --name ${{ vars.AKS_CLUSTER_NAME }} --overwrite-existing
 
-      - name: Get AKS credentials
+      - name: Setup k6 Script
         run: |
-          az aks get-credentials \
-            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
-            --name ${{ vars.AKS_CLUSTER_NAME }} \
-            --overwrite-existing
+          kubectl create configmap k6-load-test-script --namespace monitoring \
+            --from-file=load-test.js=k6/load-test.js --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Get Green user-service ClusterIP
+      - name: Run k6 Load Test against Green Pods
         run: |
-          GREEN_IP=$(kubectl get svc user-service -n production-green -o jsonpath='{.spec.clusterIP}')
-          echo "GREEN_SERVICE_URL=http://$GREEN_IP:8000" >> "$GITHUB_ENV"
-          echo "Green user-service: http://$GREEN_IP:8000"
-
-      - name: Create k6 script ConfigMap
-        run: |
-          kubectl create configmap k6-load-test-script \
-            --namespace monitoring \
-            --from-file=load-test.js=k6/load-test.js \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-      - name: Delete previous k6 job
-        run: kubectl delete job k6-load-test -n monitoring --ignore-not-found=true
-
-      - name: Run k6 load test in-cluster
-        run: |
-          sed "s|http://user-service.production-green.svc.cluster.local:8000|${{ env.GREEN_SERVICE_URL }}|g" \
-            k6/k6-job.yaml | kubectl apply -f -
-          echo "Waiting for k6 job (max 5 min)..."
+          kubectl delete job k6-load-test -n monitoring --ignore-not-found=true
+          # Grab the internal IP of the green user-service pod directly
+          GREEN_POD_IP=$(kubectl get pods -n production -l app=user-service,slot=green -o jsonpath='{.items[0].status.podIP}')
+          sed "s|http://user-service.production-green.svc.cluster.local:8000|http://$GREEN_POD_IP:8000|g" k6/k6-job.yaml | kubectl apply -f -
           kubectl wait --for=condition=complete job/k6-load-test -n monitoring --timeout=300s
-          echo "k6 passed all SLA thresholds."
 
       - name: Collect k6 results
         run: |
           K6_POD=$(kubectl get pods -n monitoring -l job-name=k6-load-test -o jsonpath='{.items[0].metadata.name}')
-          kubectl logs -n monitoring "$K6_POD"
           kubectl cp "monitoring/$K6_POD:/tmp/k6-summary.json" /tmp/k6-summary.json || true
-          if [ -f /tmp/k6-summary.json ]; then
-            cat /tmp/k6-summary.json
-            echo "K6_P95=$(jq -r '.p95_duration_ms' /tmp/k6-summary.json)"   >> "$GITHUB_ENV"
-            echo "K6_ERR=$(jq -r '.error_rate' /tmp/k6-summary.json)"        >> "$GITHUB_ENV"
-            echo "K6_REQ=$(jq -r '.total_requests' /tmp/k6-summary.json)"    >> "$GITHUB_ENV"
-            echo "K6_CHK=$(jq -r '.thresholds_passed' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
-          fi
+          echo "K6_P95=$(jq -r '.p95_duration_ms' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
+          echo "K6_ERR=$(jq -r '.error_rate' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
 
-      - name: Flip traffic to Green
+      - name: Flip Services to Green
         run: |
-          kubectl patch service koalatech-frontend -n production-blue \
-            --type=merge -p '{"spec":{"selector":{"app":"frontend","slot":"green"}}}'
-          kubectl get svc koalatech-frontend -n production-blue -o jsonpath='{.spec.selector}'
+          kubectl patch service koalatech-frontend -n production --type=merge -p '{"spec":{"selector":{"slot":"green"}}}'
+          for svc in user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl patch service $svc -n production --type=merge -p '{"spec":{"selector":{"slot":"green"}}}'
+          done
 
-      - name: Verify Green is serving traffic
-        run: |
-          FRONTEND_IP=$(kubectl get svc koalatech-frontend -n production-blue \
-            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP"
-          echo "FRONTEND_IP=$FRONTEND_IP" >> "$GITHUB_ENV"
-
-      - name: Send traffic flip success email
+      - name: Send Success Email
         if: success()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -91,22 +56,14 @@ jobs:
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
-          from: KoalaTech CI/CD <${{ secrets.GMAIL_USERNAME }}>
+          from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
           subject: "[SUCCESS] Traffic Flipped to Green — SHA: ${{ inputs.image_tag }}"
           html_body: |
             <h2 style="color:#27ae60;">Traffic Successfully Flipped to Green</h2>
-            <table border="1" cellpadding="6" style="border-collapse:collapse">
-              <tr><td><b>Image SHA</b></td><td><code>${{ inputs.image_tag }}</code></td></tr>
-              <tr><td><b>Active slot</b></td><td>Green</td></tr>
-              <tr><td><b>Frontend URL</b></td><td><a href="http://${{ env.FRONTEND_IP }}">http://${{ env.FRONTEND_IP }}</a></td></tr>
-              <tr><td><b>k6 P95 Latency</b></td><td>${{ env.K6_P95 }} ms (SLA: &lt;500ms)</td></tr>
-              <tr><td><b>k6 Error Rate</b></td><td>${{ env.K6_ERR }}</td></tr>
-              <tr><td><b>k6 Total Requests</b></td><td>${{ env.K6_REQ }}</td></tr>
-              <tr><td><b>Thresholds passed</b></td><td>${{ env.K6_CHK }}</td></tr>
-            </table>
-            <p>Blue slot remains warm. To rollback run workflow 08.</p>
+            <p><b>k6 P95 Latency:</b> ${{ env.K6_P95 }} ms (SLA: &lt;500ms)</p>
+            <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
 
-      - name: Send k6 failure alert email
+      - name: Send Failure Alert Email
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -116,12 +73,6 @@ jobs:
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
-          from: KoalaTech CI/CD <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[CRITICAL] k6 Validation FAILED — Traffic NOT flipped — SHA: ${{ inputs.image_tag }}"
-          html_body: |
-            <h2 style="color:#c0392b;">k6 Load Test FAILED — Traffic NOT flipped</h2>
-            <p><b>SHA:</b> <code>${{ inputs.image_tag }}</code></p>
-            <p><b>k6 P95:</b> ${{ env.K6_P95 }} ms (threshold: &lt;500ms)</p>
-            <p><b>Error Rate:</b> ${{ env.K6_ERR }}</p>
-            <p>Blue environment remains live. Run workflow 08 to clean up Green pods.</p>
-            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View run</a></p>
+          from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
+          subject: "[CRITICAL] k6 Validation FAILED — SHA: ${{ inputs.image_tag }}"
+          html_body: '<h2 style="color:#c0392b;">k6 Load Test FAILED</h2><p>Traffic was NOT flipped.</p>'

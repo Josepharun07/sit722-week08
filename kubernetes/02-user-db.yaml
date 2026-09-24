@@ -2,7 +2,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: user-db-pvc
-  namespace: production-blue
+  namespace: production
 spec:
   accessModes: [ReadWriteOnce]
   resources:
@@ -13,7 +13,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: user-db
-  namespace: production-blue
+  namespace: production
   labels:
     app: user-db
     slot: blue
@@ -65,7 +65,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: user-db
-  namespace: production-blue
+  namespace: production
 spec:
   selector:
     app: user-db

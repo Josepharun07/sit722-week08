@@ -2,73 +2,32 @@ name: 08 - Rollback to Blue
 
 on:
   workflow_dispatch:
-    inputs:
-      reason:
-        description: "Reason for rollback (shown in alert email)"
-        required: false
-        default: "Manual rollback triggered"
-        type: string
 
 jobs:
   rollback:
-    name: Rollback Traffic to Blue
     runs-on: ubuntu-latest
-    environment:
-      name: production
-
+    environment: production
     steps:
-      - name: Login to Azure
-        uses: azure/login@v3
+      - uses: actions/checkout@v5
+      - uses: azure/login@v3
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - run: az aks get-credentials --resource-group ${{ vars.AKS_RESOURCE_GROUP }} --name ${{ vars.AKS_CLUSTER_NAME }} --overwrite-existing
 
-      - name: Get AKS credentials
+      - name: Patch Services back to Blue
         run: |
-          az aks get-credentials \
-            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
-            --name ${{ vars.AKS_CLUSTER_NAME }} \
-            --overwrite-existing
-
-      - name: Capture pre-rollback state
-        run: |
-          echo "=== Current selector ==="
-          kubectl get svc koalatech-frontend -n production-blue \
-            -o jsonpath='{.spec.selector}' || echo "(service not found)"
-          echo ""
-          echo "=== Green pods ==="
-          kubectl get pods -n production-green --no-headers || echo "(empty)"
-          echo "=== Blue pods ==="
-          kubectl get pods -n production-blue --no-headers
-
-      - name: Patch selector back to Blue
-        run: |
-          kubectl patch service koalatech-frontend -n production-blue \
-            --type=merge -p '{"spec":{"selector":{"app":"frontend","slot":"blue"}}}'
-          kubectl get svc koalatech-frontend -n production-blue -o jsonpath='{.spec.selector}'
-
-      - name: Verify Blue is live
-        run: |
-          FRONTEND_IP=$(kubectl get svc koalatech-frontend -n production-blue \
-            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP"
-          echo "FRONTEND_IP=$FRONTEND_IP" >> "$GITHUB_ENV"
-          echo "Blue confirmed live at http://$FRONTEND_IP"
+          kubectl patch service koalatech-frontend -n production --type=merge -p '{"spec":{"selector":{"slot":"blue"}}}'
+          for svc in user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl patch service $svc -n production --type=merge -p '{"spec":{"selector":{"slot":"blue"}}}'
+          done
 
       - name: Scale Green to zero
         run: |
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl scale deployment/$svc -n production-green --replicas=0 --ignore-not-found=true
+            kubectl scale deployment/$svc-green -n production --replicas=0 --ignore-not-found=true
           done
 
-      - name: Show post-rollback state
-        run: |
-          echo "=== Blue pods (live) ==="
-          kubectl get pods -n production-blue
-          echo "=== Green pods (scaled to 0) ==="
-          kubectl get pods -n production-green
-
-      - name: Send rollback alert email
-        if: always()
+      - name: Send Rollback Email
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -77,17 +36,6 @@ jobs:
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
-          from: KoalaTech CI/CD <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[ROLLBACK] KoalaTech Production Rolled Back to Blue"
-          html_body: |
-            <h2 style="color:#c0392b;">Production Rollback — Blue Slot Restored</h2>
-            <table border="1" cellpadding="6" style="border-collapse:collapse">
-              <tr><td><b>Status</b></td><td>${{ job.status }}</td></tr>
-              <tr><td><b>Active slot</b></td><td>Blue (stable)</td></tr>
-              <tr><td><b>Frontend URL</b></td><td><a href="http://${{ env.FRONTEND_IP }}">http://${{ env.FRONTEND_IP }}</a></td></tr>
-              <tr><td><b>Reason</b></td><td>${{ inputs.reason }}</td></tr>
-              <tr><td><b>Green replicas</b></td><td>0 (scaled down)</td></tr>
-              <tr><td><b>Triggered by</b></td><td>${{ github.actor }}</td></tr>
-            </table>
-            <p>Blue confirmed live. Investigate Green failure before next deployment.</p>
-            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View run</a></p>
+          from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
+          subject: "[ROLLBACK] KoalaTech Production Restored to Blue"
+          html_body: '<h2 style="color:#c0392b;">Production Rollback Executed</h2>'

@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: enrollment-db-pvc
-  namespace: production-green
+  name: lecturer-db-pvc
+  namespace: production
 spec:
   accessModes: [ReadWriteOnce]
   resources:
@@ -12,24 +12,24 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: enrollment-db
-  namespace: production-green
+  name: lecturer-db
+  namespace: production
   labels:
-    app: enrollment-db
-    slot: green
+    app: lecturer-db
+    slot: blue
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: enrollment-db
+      app: lecturer-db
   template:
     metadata:
       labels:
-        app: enrollment-db
-        slot: green
+        app: lecturer-db
+        slot: blue
     spec:
       containers:
-        - name: enrollment-db
+        - name: lecturer-db
           image: postgres:16-alpine
           ports:
             - containerPort: 5432
@@ -45,30 +45,30 @@ spec:
                   name: postgres-secret
                   key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
-              value: enrollments
+              value: lecturers
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:
-            - name: enrollment-db-storage
+            - name: lecturer-db-storage
               mountPath: /var/lib/postgresql/data
           readinessProbe:
             exec:
-              command: [sh,-c,"pg_isready -U postgres -d enrollments"]
+              command: [sh,-c,"pg_isready -U postgres -d lecturers"]
             initialDelaySeconds: 5
             periodSeconds: 5
       volumes:
-        - name: enrollment-db-storage
+        - name: lecturer-db-storage
           persistentVolumeClaim:
-            claimName: enrollment-db-pvc
+            claimName: lecturer-db-pvc
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: enrollment-db
-  namespace: production-green
+  name: lecturer-db
+  namespace: production
 spec:
   selector:
-    app: enrollment-db
+    app: lecturer-db
   ports:
     - port: 5432
       targetPort: 5432

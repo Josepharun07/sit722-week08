@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: student-service
-  namespace: production-blue
+  name: lecturer-service
+  namespace: production
   labels:
-    app: student-service
+    app: lecturer-service
     slot: blue
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: student-service
+      app: lecturer-service
   template:
     metadata:
       labels:
-        app: student-service
+        app: lecturer-service
         slot: blue
       annotations:
         prometheus.io/scrape: "true"
@@ -22,7 +22,7 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       containers:
-        - name: student-service
+        - name: lecturer-service
           image: placeholder
           imagePullPolicy: Always
           ports:
@@ -39,9 +39,9 @@ spec:
                   name: application-secret
                   key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
-              value: students
+              value: lecturers
             - name: POSTGRES_HOST
-              value: student + "-db"
+              value: lecturer + "-db"
             - name: POSTGRES_PORT
               value: "5432"
             - name: JWT_SECRET_KEY
@@ -57,7 +57,7 @@ spec:
                   name: application-secret
                   key: AZURE_STORAGE_CONNECTION_STRING
             - name: AZURE_STORAGE_CONTAINER_NAME
-              value: student-profile-photo
+              value: lecturer-profile-photo
           readinessProbe:
             httpGet:
               path: /health
@@ -74,11 +74,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: student-service
-  namespace: production-blue
+  name: lecturer-service
+  namespace: production
 spec:
   selector:
-    app: student-service
+    app: lecturer-service
   ports:
     - port: 8000
       targetPort: 8000
