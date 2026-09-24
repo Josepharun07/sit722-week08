@@ -1,13 +1,25 @@
 name: 08 - Rollback to Blue
 
+# Continuous Delivery safety net:
+# - Auto-runs when workflow 06 fails (belt-and-suspenders rollback)
+# - Also available for manual emergency rollback
+
 on:
+  workflow_run:
+    workflows: ["06 - Deploy to Green"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   rollback:
-    name: Instant Rollback
+    name: Rollback to Blue
     runs-on: ubuntu-latest
     environment: production
+    if: >
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'failure' }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -33,13 +45,14 @@ jobs:
               -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"blue\"}}}"
           done
           echo "Traffic reverted to Blue slot"
+          kubectl get svc -n production -o custom-columns='NAME:.metadata.name,SELECTOR:.spec.selector'
 
       - name: Smoke-test frontend after rollback
         run: |
           FRONTEND_IP=$(kubectl get svc frontend -n production \
             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
           echo "Frontend IP: $FRONTEND_IP"
-          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP" || true
+          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://${FRONTEND_IP}/" || true
 
       - name: Scale Green to zero
         run: |
@@ -63,9 +76,10 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[ROLLBACK] KoalaTech Production Restored to Blue"
+          subject: "[CD ROLLBACK] KoalaTech Production Restored to Blue"
           html_body: |
-            <h2 style="color:#c0392b;">Production Rollback Executed</h2>
-            <p>All services immediately reverted to the Blue slot. Green deployments scaled to 0.</p>
-            <p>Blue confirmed live. Investigate Green failure before next deployment.</p>
+            <h2 style="color:#c0392b;">Production Rollback to Blue</h2>
+            <p>Trigger: ${{ github.event_name }}</p>
+            <p>All services reverted to Blue. Green deployments scaled to 0.</p>
+            <p>Continuous Delivery safety net kept production on the last known-good slot.</p>
             <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View workflow run</a></p>

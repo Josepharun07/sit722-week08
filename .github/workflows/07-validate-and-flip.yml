@@ -1,6 +1,6 @@
 name: 07 - Validate Green + Flip Traffic
 
-# Manual re-run only. Automatic path is now inside workflow 06 (after 05).
+# Manual re-validate / re-flip. Same CD rules: k6 gate required, auto-rollback on failure.
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
 
 jobs:
   validate-and-flip:
-    name: k6 Load Test + Traffic Flip
+    name: k6 Gate + Flip (with auto-rollback)
     runs-on: ubuntu-latest
     environment: production
 
@@ -22,8 +22,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Resolve image tag
-        run: |
-          echo "IMAGE_TAG=${{ inputs.image_tag }}" >> "$GITHUB_ENV"
+        run: echo "IMAGE_TAG=${{ inputs.image_tag }}" >> "$GITHUB_ENV"
 
       - name: Login to Azure
         uses: azure/login@v3
@@ -42,7 +41,7 @@ jobs:
           kubectl create configmap k6-load-test-script --namespace monitoring \
             --from-file=load-test.js=k6/load-test.js --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Run k6 Load Test against Green Pods
+      - name: Run k6 quality gate against Green
         run: |
           kubectl delete job k6-load-test -n monitoring --ignore-not-found=true
           sleep 3
@@ -51,7 +50,7 @@ jobs:
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].status.podIP}')
           if [ -z "$GREEN_POD_IP" ]; then
-            echo "ERROR: No Running green user-service pod found. Run workflow 06 first."
+            echo "ERROR: No Running green user-service pod. Deploy Green first (workflow 06)."
             exit 1
           fi
           echo "Testing green user-service at $GREEN_POD_IP:8000"
@@ -65,24 +64,21 @@ jobs:
             -o jsonpath='{.items[0].metadata.name}')
           kubectl logs "$K6_POD" -n monitoring | tee /tmp/k6-full.log
 
-          if grep -q '@@@K6_SUMMARY_START@@@' /tmp/k6-full.log; then
-            sed -n '/@@@K6_SUMMARY_START@@@/,/@@@K6_SUMMARY_END@@@/p' /tmp/k6-full.log \
-              | sed '1d;$d' > /tmp/k6-summary.json
-          else
-            echo "ERROR: k6 summary delimiters not found in logs"
+          if ! grep -q '@@@K6_SUMMARY_START@@@' /tmp/k6-full.log; then
+            echo "ERROR: k6 summary delimiters not found"
             exit 1
           fi
 
-          echo "Parsed summary:"
+          sed -n '/@@@K6_SUMMARY_START@@@/,/@@@K6_SUMMARY_END@@@/p' /tmp/k6-full.log \
+            | sed '1d;$d' > /tmp/k6-summary.json
           cat /tmp/k6-summary.json
           echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
           echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
           PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
           if [ "$PASSED" != "true" ]; then
-            echo "k6 thresholds failed — refusing traffic flip"
+            echo "k6 quality gate FAILED"
             exit 1
           fi
-          echo "k6 thresholds PASSED — proceeding to flip"
 
       - name: Flip Services to Green
         run: |
@@ -93,11 +89,27 @@ jobs:
               -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"green\"}}}"
           done
 
-      - name: Smoke-test frontend after flip
+      - name: Post-flip smoke test
         run: |
           FRONTEND_IP=$(kubectl get svc frontend -n production \
             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP" || true
+          curl --fail --retry 8 --retry-delay 5 --max-time 15 "http://${FRONTEND_IP}/"
+
+      - name: Auto-rollback to Blue on failure
+        if: failure()
+        run: |
+          echo "=== AUTO-ROLLBACK TO BLUE ==="
+          kubectl patch service frontend -n production --type=merge \
+            -p '{"spec":{"selector":{"app":"frontend","slot":"blue"}}}' || true
+          for svc in user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl patch service "$svc" -n production --type=merge \
+              -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"blue\"}}}" || true
+          done
+          for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            if kubectl get deployment "${svc}-green" -n production >/dev/null 2>&1; then
+              kubectl scale deployment/"${svc}-green" -n production --replicas=0 || true
+            fi
+          done
 
       - name: Send Success Email
         if: success()
@@ -110,13 +122,13 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[SUCCESS] Traffic Flipped to Green — SHA: ${{ env.IMAGE_TAG }}"
+          subject: "[CD SUCCESS] Traffic Flipped to Green — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
-            <h2 style="color:#27ae60;">Traffic Successfully Flipped to Green</h2>
+            <h2 style="color:#27ae60;">Traffic Flipped to Green</h2>
             <p><b>k6 P95:</b> ${{ env.K6_P95 }} ms</p>
             <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
 
-      - name: Send Failure Alert Email
+      - name: Send Auto-Rollback Email
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -127,6 +139,7 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[CRITICAL] k6 Validation FAILED — SHA: ${{ env.IMAGE_TAG }}"
+          subject: "[CD AUTO-ROLLBACK] Green failed — Blue restored — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
-            <h2 style="color:#c0392b;">k6 Load Test FAILED — Traffic NOT flipped</h2>
+            <h2 style="color:#c0392b;">Auto-Rollback Executed</h2>
+            <p>Green failed validation. Traffic restored to Blue. Green scaled to 0.</p>

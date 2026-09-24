@@ -1,8 +1,8 @@
 name: 06 - Deploy to Green
 
-# Fully automatic after 05: deploy Green → k6 validate → flip traffic (one job).
-# Workflow 07 remains available for manual re-validate/flip.
-# Workflow 08 remains manual rollback only.
+# Continuous Delivery (not Continuous Deployment):
+# After monitoring is up → deploy Green → k6 quality gate → flip ONLY if healthy.
+# Any failure automatically rolls traffic back to Blue and scales Green to 0.
 
 on:
   workflow_run:
@@ -18,7 +18,7 @@ on:
 
 jobs:
   deploy-validate-flip:
-    name: Green Deploy + k6 + Flip
+    name: Green CD + Auto-Rollback
     runs-on: ubuntu-latest
     environment: production
     if: >
@@ -94,6 +94,16 @@ jobs:
           kubectl apply -f kubernetes/production/05-course-db.yaml
           kubectl apply -f kubernetes/production/06-enrollment-db.yaml
 
+      - name: Ensure Blue services are the live selectors
+        run: |
+          # CD safety: never leave production pointing at a half-deployed Green
+          kubectl patch service frontend -n production --type=merge \
+            -p '{"spec":{"selector":{"app":"frontend","slot":"blue"}}}' || true
+          for svc in user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl patch service "$svc" -n production --type=merge \
+              -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"blue\"}}}" || true
+          done
+
       - name: Deploy Green with real images
         run: |
           set -e
@@ -131,7 +141,7 @@ jobs:
           kubectl create configmap k6-load-test-script --namespace monitoring \
             --from-file=load-test.js=k6/load-test.js --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Run k6 Load Test against Green
+      - name: Run k6 quality gate against Green
         run: |
           kubectl delete job k6-load-test -n monitoring --ignore-not-found=true
           sleep 3
@@ -173,12 +183,12 @@ jobs:
           echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
           PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
           if [ "$PASSED" != "true" ]; then
-            echo "k6 thresholds failed — refusing traffic flip"
+            echo "k6 quality gate FAILED — will auto-rollback to Blue"
             exit 1
           fi
-          echo "k6 thresholds PASSED — proceeding to flip"
+          echo "k6 quality gate PASSED — releasing to Green"
 
-      - name: Flip Services to Green
+      - name: Flip Services to Green (CD release)
         run: |
           kubectl patch service frontend -n production --type=merge \
             -p '{"spec":{"selector":{"app":"frontend","slot":"green"}}}'
@@ -187,14 +197,45 @@ jobs:
               -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"green\"}}}"
           done
           echo "Traffic flipped to Green slot"
-          kubectl get svc -n production -o wide
+          kubectl get svc -n production -o custom-columns='NAME:.metadata.name,SELECTOR:.spec.selector'
 
-      - name: Smoke-test frontend after flip
+      - name: Post-flip smoke test
         run: |
           FRONTEND_IP=$(kubectl get svc frontend -n production \
             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
           echo "Frontend IP: $FRONTEND_IP"
-          curl --fail --retry 5 --retry-delay 5 --max-time 10 "http://$FRONTEND_IP" || true
+          # Must succeed — failure triggers auto-rollback
+          curl --fail --retry 8 --retry-delay 5 --max-time 15 "http://${FRONTEND_IP}/"
+          echo "Post-flip smoke test PASSED"
+
+      - name: Auto-rollback to Blue on failure
+        if: failure()
+        run: |
+          echo "=== CONTINUOUS DELIVERY AUTO-ROLLBACK ==="
+          echo "Green failed quality gate or smoke test — restoring Blue"
+
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing || true
+
+          kubectl patch service frontend -n production --type=merge \
+            -p '{"spec":{"selector":{"app":"frontend","slot":"blue"}}}' || true
+          for svc in user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl patch service "$svc" -n production --type=merge \
+              -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"blue\"}}}" || true
+          done
+
+          for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            if kubectl get deployment "${svc}-green" -n production >/dev/null 2>&1; then
+              kubectl scale deployment/"${svc}-green" -n production --replicas=0 || true
+              echo "Scaled ${svc}-green → 0"
+            fi
+          done
+
+          echo "Rollback complete — Blue is live"
+          kubectl get svc -n production -o custom-columns='NAME:.metadata.name,SELECTOR:.spec.selector'
+          kubectl get deploy -n production
 
       - name: Send Success Email
         if: success()
@@ -207,15 +248,16 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[SUCCESS] Green Deployed + Traffic Flipped — SHA: ${{ env.IMAGE_TAG }}"
+          subject: "[CD SUCCESS] Released to Green — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
-            <h2 style="color:#27ae60;">Green Deploy + Traffic Flip SUCCESS</h2>
+            <h2 style="color:#27ae60;">Continuous Delivery Release SUCCESS</h2>
             <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
             <p><b>k6 P95 Latency:</b> ${{ env.K6_P95 }} ms (SLA: &lt;500ms)</p>
             <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
-            <p>Blue remains as hot-standby. Run workflow 08 to rollback.</p>
+            <p>Quality gates passed. Live traffic is on <b>Green</b>. Blue remains warm standby.</p>
+            <p>Manual rollback: run workflow 08.</p>
 
-      - name: Send Failure Email
+      - name: Send Auto-Rollback Email
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -226,9 +268,12 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[CRITICAL] Green/k6 FAILED — SHA: ${{ env.IMAGE_TAG }}"
+          subject: "[CD AUTO-ROLLBACK] Green failed — Blue restored — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
-            <h2 style="color:#c0392b;">Green Deploy or k6 Validation FAILED</h2>
+            <h2 style="color:#c0392b;">Continuous Delivery Auto-Rollback</h2>
             <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
-            <p>Traffic was NOT flipped (or flip did not complete). Blue remains live.</p>
-            <p>Run workflow 08 if Green needs cleanup.</p>
+            <p><b>k6 P95:</b> ${{ env.K6_P95 }}</p>
+            <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
+            <p>Green failed deploy, k6 quality gate, or post-flip smoke test.</p>
+            <p><b>Automatic action:</b> traffic restored to <b>Blue</b>, Green scaled to 0.</p>
+            <p>Production remains safe. Investigate before the next release.</p>
