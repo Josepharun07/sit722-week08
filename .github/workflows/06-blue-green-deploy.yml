@@ -1,10 +1,14 @@
 name: 06 - Deploy to Green
 
 on:
+  workflow_run:
+    workflows: ["05 - Deploy Monitoring Stack"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Git SHA to deploy to Green"
+        description: "Git SHA already built/pushed by CI (must exist in ACR)"
         required: true
         type: string
 
@@ -13,9 +17,27 @@ jobs:
     name: Deploy to Green Slot
     runs-on: ubuntu-latest
     environment: production
+    if: >
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'success' }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve image tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="${{ github.event.workflow_run.head_sha }}"
+          fi
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using image tag: $TAG"
 
       - name: Login to Azure
         uses: azure/login@v3
@@ -29,7 +51,25 @@ jobs:
             --name ${{ vars.AKS_CLUSTER_NAME }} \
             --overwrite-existing
 
-      - name: Apply Base Production (DBs, Services, Blue Pods)
+      - name: Ensure ACR is attached to AKS
+        run: |
+          az aks update \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --attach-acr ${{ vars.ACR_NAME }} || true
+
+      - name: Verify images exist in ACR
+        run: |
+          set -e
+          for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            echo "Checking ${{ vars.ACR_LOGIN_SERVER }}/koalatech-${svc}:${IMAGE_TAG}"
+            az acr repository show \
+              --name ${{ vars.ACR_NAME }} \
+              --image "koalatech-${svc}:${IMAGE_TAG}" \
+              --query "name" -o tsv
+          done
+
+      - name: Ensure secrets + DBs (never reset blue app images)
         run: |
           kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret generic postgres-secret --namespace production \
@@ -45,34 +85,52 @@ jobs:
             --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
             --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
             --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -f kubernetes/production/
+          kubectl apply -f kubernetes/production/01-namespace.yaml
+          kubectl apply -f kubernetes/production/02-user-db.yaml
+          kubectl apply -f kubernetes/production/03-student-db.yaml
+          kubectl apply -f kubernetes/production/04-lecturer-db.yaml
+          kubectl apply -f kubernetes/production/05-course-db.yaml
+          kubectl apply -f kubernetes/production/06-enrollment-db.yaml
 
-      - name: Deploy Green Pods
+      - name: Deploy Green with real images
         run: |
-          # Ensure green deployments use *-green names (never overwrite blue)
-          kubectl apply -f kubernetes/production-green/
+          set -e
+          mkdir -p /tmp/green
+          ACR="${{ vars.ACR_LOGIN_SERVER }}"
 
-      - name: Update Images on Green Deployments
-        run: |
+          sed "s|image: placeholder|image: ${ACR}/koalatech-user-service:${IMAGE_TAG}|g" \
+            kubernetes/production-green/07-user-service.yaml > /tmp/green/07-user-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-student-service:${IMAGE_TAG}|g" \
+            kubernetes/production-green/08-student-service.yaml > /tmp/green/08-student-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-lecturer-service:${IMAGE_TAG}|g" \
+            kubernetes/production-green/09-lecturer-service.yaml > /tmp/green/09-lecturer-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-course-service:${IMAGE_TAG}|g" \
+            kubernetes/production-green/10-course-service.yaml > /tmp/green/10-course-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-enrollment-service:${IMAGE_TAG}|g" \
+            kubernetes/production-green/11-enrollment-service.yaml > /tmp/green/11-enrollment-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-frontend:${IMAGE_TAG}|g" \
+            kubernetes/production-green/12-frontend.yaml > /tmp/green/12-frontend.yaml
+
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
-            kubectl set image deployment/${svc}-green \
-              ${svc}=${{ vars.ACR_LOGIN_SERVER }}/koalatech-${svc}:${{ inputs.image_tag }} \
-              -n production
+            kubectl delete deployment "${svc}-green" -n production --ignore-not-found=true
           done
+
+          kubectl apply -f /tmp/green/
 
       - name: Wait for Green Rollouts
         run: |
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            echo "Waiting for ${svc}-green..."
             kubectl rollout status deployment/${svc}-green -n production --timeout=300s
           done
 
       - name: Verify Green pods Running
         run: |
-          kubectl get pods -n production -l slot=green
-          NOT_RUNNING=$(kubectl get pods -n production -l slot=green --no-headers 2>/dev/null | grep -v Running | wc -l || true)
+          kubectl get pods -n production -l slot=green -o wide
+          NOT_RUNNING=$(kubectl get pods -n production -l slot=green --no-headers 2>/dev/null | grep -v Running | grep -v Completed | wc -l || true)
           if [ "$NOT_RUNNING" -gt 0 ]; then
             echo "ERROR: $NOT_RUNNING green pod(s) not Running"
-            kubectl get pods -n production -l slot=green
+            kubectl describe pods -n production -l slot=green | tail -100
             exit 1
           fi
 
@@ -87,10 +145,10 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[${{ job.status }}] Green Deployment Ready — SHA: ${{ inputs.image_tag }}"
+          subject: "[${{ job.status }}] Green Deployment Ready — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
             <h2 style="color:#27ae60;">Green Deployment - ${{ job.status }}</h2>
-            <p><b>Image SHA:</b> <code>${{ inputs.image_tag }}</code></p>
+            <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
             <p>Green pods are running in isolation. Live traffic is still on Blue.</p>
-            <p><b>Next step:</b> Run workflow 07 - Validate Green + Flip Traffic with the same SHA.</p>
+            <p>Workflow 07 will auto-start to validate with k6 and flip traffic.</p>
             <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View workflow run</a></p>

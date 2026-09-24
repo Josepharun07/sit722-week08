@@ -1,11 +1,15 @@
 name: 07 - Validate Green + Flip Traffic
 
 on:
+  workflow_run:
+    workflows: ["06 - Deploy to Green"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Git SHA currently on Green"
-        required: true
+        description: "Git SHA currently on Green (optional for auto runs)"
+        required: false
         type: string
 
 jobs:
@@ -13,9 +17,25 @@ jobs:
     name: k6 Load Test + Traffic Flip
     runs-on: ubuntu-latest
     environment: production
+    if: >
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'success' }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve image tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.image_tag }}" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="${{ github.event.workflow_run.head_sha || github.sha }}"
+          fi
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Using image tag: $TAG"
 
       - name: Login to Azure
         uses: azure/login@v3
@@ -40,14 +60,15 @@ jobs:
           sleep 3
 
           GREEN_POD_IP=$(kubectl get pods -n production -l app=user-service,slot=green \
+            --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].status.podIP}')
           if [ -z "$GREEN_POD_IP" ]; then
-            echo "ERROR: No green user-service pod found. Run workflow 06 first."
+            echo "ERROR: No Running green user-service pod found."
+            kubectl get pods -n production -l slot=green -o wide
             exit 1
           fi
           echo "Testing green user-service at $GREEN_POD_IP:8000"
 
-          # Inject green pod IP into the k6 Job SERVICE_URL
           sed "s|REPLACE_SERVICE_URL|http://${GREEN_POD_IP}:8000|g" k6/k6-job.yaml | kubectl apply -f -
           kubectl wait --for=condition=complete job/k6-load-test -n monitoring --timeout=300s
 
@@ -102,13 +123,13 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[SUCCESS] Traffic Flipped to Green — SHA: ${{ inputs.image_tag }}"
+          subject: "[SUCCESS] Traffic Flipped to Green — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
             <h2 style="color:#27ae60;">Traffic Successfully Flipped to Green</h2>
-            <p><b>Image SHA:</b> <code>${{ inputs.image_tag }}</code></p>
+            <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
             <p><b>k6 P95 Latency:</b> ${{ env.K6_P95 }} ms (SLA: &lt;500ms)</p>
             <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
-            <p>Blue pods remain online as hot-standby. To rollback, run workflow 08.</p>
+            <p>Blue pods remain online as hot-standby. To rollback, run workflow 08 manually.</p>
 
       - name: Send Failure Alert Email
         if: failure()
@@ -121,10 +142,10 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[CRITICAL] k6 Validation FAILED — SHA: ${{ inputs.image_tag }}"
+          subject: "[CRITICAL] k6 Validation FAILED — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
             <h2 style="color:#c0392b;">k6 Load Test FAILED — Traffic NOT flipped</h2>
-            <p><b>Image SHA:</b> <code>${{ inputs.image_tag }}</code></p>
+            <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
             <p><b>k6 P95:</b> ${{ env.K6_P95 }}</p>
             <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
             <p>Blue environment remains live. Run workflow 08 to clean up Green if needed.</p>
