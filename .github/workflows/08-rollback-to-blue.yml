@@ -1,12 +1,12 @@
 name: 08 - Rollback to Blue
 
 # Continuous Delivery safety net:
-# - Auto-runs when workflow 06 fails (belt-and-suspenders rollback)
-# - Also available for manual emergency rollback
+# - Auto-runs when workflow 07 fails
+# - Manual emergency rollback anytime
 
 on:
   workflow_run:
-    workflows: ["06 - Deploy to Green"]
+    workflows: ["07 - Validate Green + Flip Traffic"]
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -44,10 +44,10 @@ jobs:
             kubectl patch service "$svc" -n production --type=merge \
               -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"blue\"}}}"
           done
-          echo "Traffic reverted to Blue slot"
+          echo "Traffic reverted to Blue"
           kubectl get svc -n production -o custom-columns='NAME:.metadata.name,SELECTOR:.spec.selector'
 
-      - name: Smoke-test frontend after rollback
+      - name: Smoke-test frontend
         run: |
           FRONTEND_IP=$(kubectl get svc frontend -n production \
             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
@@ -61,7 +61,7 @@ jobs:
               kubectl scale deployment/"${svc}-green" -n production --replicas=0
               echo "Scaled ${svc}-green to 0"
             else
-              echo "Deployment ${svc}-green not found — skipping"
+              echo "${svc}-green not found — skip"
             fi
           done
 
@@ -76,10 +76,9 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           to: ${{ secrets.NOTIFICATION_EMAIL }}
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
-          subject: "[CD ROLLBACK] KoalaTech Production Restored to Blue"
+          subject: "[CD ROLLBACK] Production Restored to Blue"
           html_body: |
-            <h2 style="color:#c0392b;">Production Rollback to Blue</h2>
-            <p>Trigger: ${{ github.event_name }}</p>
-            <p>All services reverted to Blue. Green deployments scaled to 0.</p>
-            <p>Continuous Delivery safety net kept production on the last known-good slot.</p>
-            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View workflow run</a></p>
+            <h2 style="color:#c0392b;">Rollback to Blue</h2>
+            <p>Trigger: <code>${{ github.event_name }}</code></p>
+            <p>All services on Blue. Green scaled to 0.</p>
+            <p><a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">View run</a></p>

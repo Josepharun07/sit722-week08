@@ -1,28 +1,46 @@
 name: 07 - Validate Green + Flip Traffic
 
-# Manual re-validate / re-flip. Same CD rules: k6 gate required, auto-rollback on failure.
+# Continuous Delivery — Stage 2 of Blue/Green release
+# Runs AFTER 06. k6 quality gate → flip to Green ONLY if healthy.
+# On failure: auto-rollback to Blue + scale Green to 0.
 
 on:
+  workflow_run:
+    workflows: ["06 - Deploy to Green"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Git SHA currently on Green (for email subject)"
+        description: "Git SHA on Green (for emails; optional on auto runs)"
         required: false
         type: string
-        default: "manual-rerun"
+        default: "auto"
 
 jobs:
   validate-and-flip:
-    name: k6 Gate + Flip (with auto-rollback)
+    name: k6 Gate + Flip
     runs-on: ubuntu-latest
     environment: production
+    if: >
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Resolve image tag
-        run: echo "IMAGE_TAG=${{ inputs.image_tag }}" >> "$GITHUB_ENV"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.image_tag }}" ] && [ "${{ inputs.image_tag }}" != "auto" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="${{ github.event.workflow_run.head_sha || github.sha }}"
+          fi
+          echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Using image tag: $TAG"
 
       - name: Login to Azure
         uses: azure/login@v3
@@ -50,7 +68,8 @@ jobs:
             --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].status.podIP}')
           if [ -z "$GREEN_POD_IP" ]; then
-            echo "ERROR: No Running green user-service pod. Deploy Green first (workflow 06)."
+            echo "ERROR: No Running green user-service pod. Workflow 06 must succeed first."
+            kubectl get pods -n production -l slot=green -o wide || true
             exit 1
           fi
           echo "Testing green user-service at $GREEN_POD_IP:8000"
@@ -72,13 +91,16 @@ jobs:
           sed -n '/@@@K6_SUMMARY_START@@@/,/@@@K6_SUMMARY_END@@@/p' /tmp/k6-full.log \
             | sed '1d;$d' > /tmp/k6-summary.json
           cat /tmp/k6-summary.json
+          jq . /tmp/k6-summary.json > /dev/null
+
           echo "K6_P95=$(jq -r '.p95_duration_ms // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
           echo "K6_ERR=$(jq -r '.error_rate // "n/a"' /tmp/k6-summary.json)" >> "$GITHUB_ENV"
           PASSED=$(jq -r '.thresholds_passed // false' /tmp/k6-summary.json)
           if [ "$PASSED" != "true" ]; then
-            echo "k6 quality gate FAILED"
+            echo "k6 quality gate FAILED — will auto-rollback"
             exit 1
           fi
+          echo "k6 quality gate PASSED"
 
       - name: Flip Services to Green
         run: |
@@ -88,17 +110,25 @@ jobs:
             kubectl patch service "$svc" -n production --type=merge \
               -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"green\"}}}"
           done
+          kubectl get svc -n production -o custom-columns='NAME:.metadata.name,SELECTOR:.spec.selector'
 
       - name: Post-flip smoke test
         run: |
           FRONTEND_IP=$(kubectl get svc frontend -n production \
             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "Frontend IP: $FRONTEND_IP"
           curl --fail --retry 8 --retry-delay 5 --max-time 15 "http://${FRONTEND_IP}/"
+          echo "Post-flip smoke test PASSED"
 
       - name: Auto-rollback to Blue on failure
         if: failure()
         run: |
-          echo "=== AUTO-ROLLBACK TO BLUE ==="
+          echo "=== CD AUTO-ROLLBACK TO BLUE ==="
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing || true
+
           kubectl patch service frontend -n production --type=merge \
             -p '{"spec":{"selector":{"app":"frontend","slot":"blue"}}}' || true
           for svc in user-service student-service lecturer-service course-service enrollment-service; do
@@ -108,8 +138,11 @@ jobs:
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
             if kubectl get deployment "${svc}-green" -n production >/dev/null 2>&1; then
               kubectl scale deployment/"${svc}-green" -n production --replicas=0 || true
+              echo "Scaled ${svc}-green → 0"
             fi
           done
+          echo "Blue restored"
+          kubectl get svc -n production -o custom-columns='NAME:.metadata.name,SELECTOR:.spec.selector'
 
       - name: Send Success Email
         if: success()
@@ -124,9 +157,12 @@ jobs:
           from: KoalaTech SRE <${{ secrets.GMAIL_USERNAME }}>
           subject: "[CD SUCCESS] Traffic Flipped to Green — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
-            <h2 style="color:#27ae60;">Traffic Flipped to Green</h2>
-            <p><b>k6 P95:</b> ${{ env.K6_P95 }} ms</p>
+            <h2 style="color:#27ae60;">Continuous Delivery Release SUCCESS</h2>
+            <p><b>Image SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
+            <p><b>k6 P95:</b> ${{ env.K6_P95 }} ms (SLA &lt;500ms)</p>
             <p><b>k6 Error Rate:</b> ${{ env.K6_ERR }}</p>
+            <p>Live traffic is on <b>Green</b>. Blue remains warm standby.</p>
+            <p>Manual rollback: workflow 08.</p>
 
       - name: Send Auto-Rollback Email
         if: failure()
@@ -142,4 +178,6 @@ jobs:
           subject: "[CD AUTO-ROLLBACK] Green failed — Blue restored — SHA: ${{ env.IMAGE_TAG }}"
           html_body: |
             <h2 style="color:#c0392b;">Auto-Rollback Executed</h2>
-            <p>Green failed validation. Traffic restored to Blue. Green scaled to 0.</p>
+            <p><b>SHA:</b> <code>${{ env.IMAGE_TAG }}</code></p>
+            <p><b>k6 P95:</b> ${{ env.K6_P95 }} | <b>Error rate:</b> ${{ env.K6_ERR }}</p>
+            <p>k6 gate or smoke test failed. Traffic restored to Blue. Green scaled to 0.</p>
