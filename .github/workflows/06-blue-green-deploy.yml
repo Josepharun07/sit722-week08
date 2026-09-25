@@ -93,6 +93,23 @@ jobs:
           kubectl apply -f kubernetes/production/04-lecturer-db.yaml
           kubectl apply -f kubernetes/production/05-course-db.yaml
           kubectl apply -f kubernetes/production/06-enrollment-db.yaml
+          for db in user-db student-db lecturer-db course-db enrollment-db; do
+            kubectl rollout status deployment/"${db}" -n production --timeout=300s
+          done
+          # POSTGRES_DB only runs on first init; reused PVCs may lack the named DB
+          ensure_db() {
+            local deploy="$1" dbname="$2"
+            kubectl exec -n production "deploy/${deploy}" -- \
+              psql -U postgres -v ON_ERROR_STOP=1 -tc \
+              "SELECT 1 FROM pg_database WHERE datname='${dbname}'" | grep -q 1 \
+              || kubectl exec -n production "deploy/${deploy}" -- \
+                psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${dbname};"
+          }
+          ensure_db user-db users
+          ensure_db student-db students
+          ensure_db lecturer-db lecturers
+          ensure_db course-db courses
+          ensure_db enrollment-db enrollments
 
       - name: Keep live traffic on Blue while Green deploys
         run: |

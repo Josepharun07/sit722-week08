@@ -67,85 +67,82 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Apply Kubernetes manifests (Blue baseline)
+      - name: Apply database manifests first
         run: |
-          # Selector labels are immutable — recreate app deployments if slot labels changed
+          kubectl apply -f kubernetes/production/01-namespace.yaml
+          kubectl apply -f kubernetes/production/02-user-db.yaml
+          kubectl apply -f kubernetes/production/03-student-db.yaml
+          kubectl apply -f kubernetes/production/04-lecturer-db.yaml
+          kubectl apply -f kubernetes/production/05-course-db.yaml
+          kubectl apply -f kubernetes/production/06-enrollment-db.yaml
+
+      - name: Wait for databases
+        run: |
+          for db in user-db student-db lecturer-db course-db enrollment-db; do
+            echo "Waiting for ${db}..."
+            kubectl rollout status deployment/"${db}" -n production --timeout=300s
+          done
+
+      - name: Ensure application databases exist
+        run: |
+          # POSTGRES_DB only runs on first init. Reused PVCs may lack the named DB.
+          ensure_db() {
+            local deploy="$1"
+            local dbname="$2"
+            kubectl exec -n production "deploy/${deploy}" -- \
+              psql -U postgres -v ON_ERROR_STOP=1 -tc \
+              "SELECT 1 FROM pg_database WHERE datname='${dbname}'" | grep -q 1 \
+              || kubectl exec -n production "deploy/${deploy}" -- \
+                psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${dbname};"
+            echo "OK: ${dbname}"
+          }
+          ensure_db user-db users
+          ensure_db student-db students
+          ensure_db lecturer-db lecturers
+          ensure_db course-db courses
+          ensure_db enrollment-db enrollments
+
+      - name: Deploy Blue apps with real images
+        run: |
+          set -e
+          ACR="${{ vars.ACR_LOGIN_SERVER }}"
+          TAG="${{ github.event.workflow_run.head_sha }}"
+          mkdir -p /tmp/blue
+
+          # Never apply placeholder images — inject the real ACR tag first
+          sed "s|image: placeholder|image: ${ACR}/koalatech-user-service:${TAG}|g" \
+            kubernetes/production/07-user-service.yaml > /tmp/blue/07-user-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-student-service:${TAG}|g" \
+            kubernetes/production/08-student-service.yaml > /tmp/blue/08-student-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-lecturer-service:${TAG}|g" \
+            kubernetes/production/09-lecturer-service.yaml > /tmp/blue/09-lecturer-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-course-service:${TAG}|g" \
+            kubernetes/production/10-course-service.yaml > /tmp/blue/10-course-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-enrollment-service:${TAG}|g" \
+            kubernetes/production/11-enrollment-service.yaml > /tmp/blue/11-enrollment-service.yaml
+          sed "s|image: placeholder|image: ${ACR}/koalatech-frontend:${TAG}|g" \
+            kubernetes/production/12-frontend.yaml > /tmp/blue/12-frontend.yaml
+
+          # Recreate so old placeholder RSes cannot block RollingUpdate
           for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
             kubectl delete deployment "$svc" -n production --ignore-not-found=true
           done
-          kubectl apply -f kubernetes/production/
+          kubectl apply -f /tmp/blue/
 
-      - name: Update frontend image
-        run: |
-          kubectl set image deployment/frontend \
-            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ github.event.workflow_run.head_sha }} \
-            -n production
+          # Keep Services pointing at Blue
+          kubectl patch service frontend -n production --type=merge \
+            -p '{"spec":{"selector":{"app":"frontend","slot":"blue"}}}' || true
+          for svc in user-service student-service lecturer-service course-service enrollment-service; do
+            kubectl patch service "$svc" -n production --type=merge \
+              -p "{\"spec\":{\"selector\":{\"app\":\"$svc\",\"slot\":\"blue\"}}}" || true
+          done
 
-      - name: Update user-service image
+      - name: Wait for Blue app rollouts
         run: |
-          kubectl set image deployment/user-service \
-            user-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-user-service:${{ github.event.workflow_run.head_sha }} \
-            -n production
-
-      - name: Update student-service image
-        run: |
-          kubectl set image deployment/student-service \
-            student-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-student-service:${{ github.event.workflow_run.head_sha }} \
-            -n production
-
-      - name: Update lecturer-service image
-        run: |
-          kubectl set image deployment/lecturer-service \
-            lecturer-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-lecturer-service:${{ github.event.workflow_run.head_sha }} \
-            -n production
-
-      - name: Update course-service image
-        run: |
-          kubectl set image deployment/course-service \
-            course-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:${{ github.event.workflow_run.head_sha }} \
-            -n production
-
-      - name: Update enrollment-service image
-        run: |
-          kubectl set image deployment/enrollment-service \
-            enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ github.event.workflow_run.head_sha }} \
-            -n production
-
-      - name: Wait for frontend rollout
-        run: |
-          kubectl rollout status deployment/frontend \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for user-service rollout
-        run: |
-          kubectl rollout status deployment/user-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for student-service rollout
-        run: |
-          kubectl rollout status deployment/student-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for lecturer-service rollout
-        run: |
-          kubectl rollout status deployment/lecturer-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for course-service rollout
-        run: |
-          kubectl rollout status deployment/course-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for enrollment-service rollout
-        run: |
-          kubectl rollout status deployment/enrollment-service \
-            -n production \
-            --timeout=300s
+          for svc in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            echo "Waiting for ${svc}..."
+            kubectl rollout status deployment/"${svc}" -n production --timeout=300s
+          done
 
       - name: Show production resources
         run: |
